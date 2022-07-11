@@ -32,12 +32,16 @@ type Packer interface {
 		op Op,
 		fieldValues map[Field]interface{},
 		compress bool,
+		bypassThrottling bool,
 	) (OutboundMessage, error)
 }
 
 type Parser interface {
 	SetTime(t time.Time) // useful in UTs
-	Parse(bytes []byte, nodeID ids.ShortID, onFinishedHandling func()) (InboundMessage, error)
+
+	// Parse reads given bytes as InboundMessage
+	// Overrides client specified deadline in a message to maxDeadlineDuration
+	Parse(bytes []byte, nodeID ids.NodeID, onFinishedHandling func()) (InboundMessage, error)
 }
 
 type Codec interface {
@@ -57,9 +61,10 @@ type codec struct {
 	compressTimeMetrics   map[Op]metric.Averager
 	decompressTimeMetrics map[Op]metric.Averager
 	compressor            compression.Compressor
+	maxMessageTimeout     time.Duration
 }
 
-func NewCodecWithMemoryPool(namespace string, metrics prometheus.Registerer, maxMessageSize int64) (Codec, error) {
+func NewCodecWithMemoryPool(namespace string, metrics prometheus.Registerer, maxMessageSize int64, maxMessageTimeout time.Duration) (Codec, error) {
 	c := &codec{
 		byteSlicePool: sync.Pool{
 			New: func() interface{} {
@@ -69,11 +74,12 @@ func NewCodecWithMemoryPool(namespace string, metrics prometheus.Registerer, max
 		compressTimeMetrics:   make(map[Op]metric.Averager, len(ExternalOps)),
 		decompressTimeMetrics: make(map[Op]metric.Averager, len(ExternalOps)),
 		compressor:            compression.NewGzipCompressor(maxMessageSize),
+		maxMessageTimeout:     maxMessageTimeout,
 	}
 
 	errs := wrappers.Errs{}
 	for _, op := range ExternalOps {
-		if !op.Compressable() {
+		if !op.Compressible() {
 			continue
 		}
 
@@ -105,10 +111,12 @@ func (c *codec) SetTime(t time.Time) {
 // [buffer]'s contents may be overwritten by this method.
 // [buffer] may be nil.
 // If [compress], compress the payload.
+// If [bypassThrottling], mark the message to avoid outbound throttling checks.
 func (c *codec) Pack(
 	op Op,
 	fieldValues map[Field]interface{},
 	compress bool,
+	bypassThrottling bool,
 ) (OutboundMessage, error) {
 	msgFields, ok := messages[op]
 	if !ok {
@@ -124,7 +132,7 @@ func (c *codec) Pack(
 	p.PackByte(byte(op))
 
 	// Optionally, pack whether the payload is compressed
-	if op.Compressable() {
+	if op.Compressible() {
 		p.PackBool(compress)
 	}
 
@@ -140,10 +148,11 @@ func (c *codec) Pack(
 		return nil, p.Err
 	}
 	msg := &outboundMessage{
-		op:    op,
-		bytes: p.Bytes,
-		refs:  1,
-		c:     c,
+		op:               op,
+		bytes:            p.Bytes,
+		refs:             1,
+		c:                c,
+		bypassThrottling: bypassThrottling,
 	}
 	if !compress {
 		return msg, nil
@@ -169,7 +178,8 @@ func (c *codec) Pack(
 
 // Parse attempts to convert bytes into a message.
 // The first byte of the message is the opcode of the message.
-func (c *codec) Parse(bytes []byte, nodeID ids.ShortID, onFinishedHandling func()) (InboundMessage, error) {
+// Overrides client specified deadline in a message to maxDeadlineDuration
+func (c *codec) Parse(bytes []byte, nodeID ids.NodeID, onFinishedHandling func()) (InboundMessage, error) {
 	p := wrappers.Packer{Bytes: bytes}
 
 	// Unpack the op code (message type)
@@ -182,7 +192,7 @@ func (c *codec) Parse(bytes []byte, nodeID ids.ShortID, onFinishedHandling func(
 
 	// See if messages of this type may be compressed
 	compressed := false
-	if op.Compressable() {
+	if op.Compressible() {
 		compressed = p.UnpackBool()
 	}
 	if p.Err != nil {
@@ -217,14 +227,21 @@ func (c *codec) Parse(bytes []byte, nodeID ids.ShortID, onFinishedHandling func(
 	for _, field := range msgFields {
 		fieldValues[field] = field.Unpacker()(&p)
 	}
+	if p.Err != nil {
+		return nil, p.Err
+	}
 
 	if p.Offset != len(p.Bytes) {
-		return nil, fmt.Errorf("expected length %d but got %d", len(p.Bytes), p.Offset)
+		return nil, fmt.Errorf("expected length %d but got %d", p.Offset, len(p.Bytes))
 	}
 
 	var expirationTime time.Time
 	if deadline, hasDeadline := fieldValues[Deadline]; hasDeadline {
-		expirationTime = c.clock.Time().Add(time.Duration(deadline.(uint64)))
+		deadlineDuration := time.Duration(deadline.(uint64))
+		if deadlineDuration > c.maxMessageTimeout {
+			deadlineDuration = c.maxMessageTimeout
+		}
+		expirationTime = c.clock.Time().Add(deadlineDuration)
 	}
 
 	return &inboundMessage{
@@ -234,5 +251,5 @@ func (c *codec) Parse(bytes []byte, nodeID ids.ShortID, onFinishedHandling func(
 		nodeID:                nodeID,
 		expirationTime:        expirationTime,
 		onFinishedHandling:    onFinishedHandling,
-	}, p.Err
+	}, nil
 }

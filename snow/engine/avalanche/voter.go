@@ -12,7 +12,7 @@ import (
 // Voter records chits received from [vdr] once its dependencies are met.
 type voter struct {
 	t         *Transitive
-	vdr       ids.ShortID
+	vdr       ids.NodeID
 	requestID uint32
 	response  []ids.ID
 	deps      ids.Set
@@ -68,7 +68,7 @@ func (v *voter) Update() {
 	if len(txs) > 0 {
 		v.t.Ctx.Log.Debug("Re-issuing %d transactions", len(txs))
 	}
-	if _, err := v.t.batch(txs, true /*=force*/, false /*empty*/, false /*=limit*/); err != nil {
+	if _, err := v.t.batch(txs, batchOption{force: true}); err != nil {
 		v.t.errs.Add(err)
 		return
 	}

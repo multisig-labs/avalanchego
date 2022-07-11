@@ -13,59 +13,52 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/ava-labs/avalanchego/ids"
-	"github.com/ava-labs/avalanchego/utils"
+	"github.com/ava-labs/avalanchego/utils/ips"
 	"github.com/ava-labs/avalanchego/utils/units"
 	"github.com/ava-labs/avalanchego/version"
 )
 
 var (
-	UncompressingBuilder OutboundMsgBuilder
-	TestCodec            Codec
+	UncompressingBuilder  OutboundMsgBuilder
+	TestInboundMsgBuilder InboundMsgBuilder
+	TestCodec             Codec
 
-	dummyNodeID             = ids.ShortEmpty
+	dummyNodeID             = ids.EmptyNodeID
 	dummyOnFinishedHandling = func() {}
 )
 
 func init() {
-	codec, err := NewCodecWithMemoryPool("", prometheus.NewRegistry(), 2*units.MiB)
+	codec, err := NewCodecWithMemoryPool("", prometheus.NewRegistry(), 2*units.MiB, 10*time.Second)
 	if err != nil {
 		panic(err)
 	}
 	TestCodec = codec
 	UncompressingBuilder = NewOutboundBuilder(codec, false /*compress*/)
-}
-
-func TestBuildGetVersion(t *testing.T) {
-	msg, err := UncompressingBuilder.GetVersion()
-	assert.NoError(t, err)
-	assert.NotNil(t, msg)
-	assert.Equal(t, GetVersion, msg.Op())
-
-	parsedMsg, err := TestCodec.Parse(msg.Bytes(), dummyNodeID, dummyOnFinishedHandling)
-	assert.NoError(t, err)
-	assert.NotNil(t, parsedMsg)
-	assert.Equal(t, GetVersion, parsedMsg.Op())
+	TestInboundMsgBuilder = NewInboundBuilder(codec)
 }
 
 func TestBuildVersion(t *testing.T) {
 	networkID := uint32(12345)
-	nodeID := uint32(56789)
 	myTime := uint64(time.Now().Unix())
-	ip := utils.IPDesc{
+	ip := ips.IPPort{
 		IP: net.IPv4(1, 2, 3, 4),
 	}
 
-	myVersion := version.NewDefaultVersion(1, 2, 3).String()
+	myVersion := &version.Semantic{
+		Major: 1,
+		Minor: 2,
+		Patch: 3,
+	}
+	myVersionStr := myVersion.String()
 	myVersionTime := uint64(time.Now().Unix())
 	sig := make([]byte, 65)
 	subnetID := ids.Empty.Prefix(1)
 	subnetIDs := [][]byte{subnetID[:]}
 	msg, err := UncompressingBuilder.Version(
 		networkID,
-		nodeID,
 		myTime,
 		ip,
-		myVersion,
+		myVersionStr,
 		myVersionTime,
 		sig,
 		[]ids.ID{subnetID},
@@ -80,25 +73,12 @@ func TestBuildVersion(t *testing.T) {
 	assert.NotNil(t, parsedMsg)
 	assert.Equal(t, Version, parsedMsg.Op())
 	assert.EqualValues(t, networkID, parsedMsg.Get(NetworkID))
-	assert.EqualValues(t, nodeID, parsedMsg.Get(NodeID))
 	assert.EqualValues(t, myTime, parsedMsg.Get(MyTime))
 	assert.EqualValues(t, ip, parsedMsg.Get(IP))
-	assert.EqualValues(t, myVersion, parsedMsg.Get(VersionStr))
+	assert.EqualValues(t, myVersionStr, parsedMsg.Get(VersionStr))
 	assert.EqualValues(t, myVersionTime, parsedMsg.Get(VersionTime))
 	assert.EqualValues(t, sig, parsedMsg.Get(SigBytes))
 	assert.EqualValues(t, subnetIDs, parsedMsg.Get(TrackedSubnets))
-}
-
-func TestBuildGetPeerList(t *testing.T) {
-	msg, err := UncompressingBuilder.GetPeerList()
-	assert.NoError(t, err)
-	assert.NotNil(t, msg)
-	assert.Equal(t, GetPeerList, msg.Op())
-
-	parsedMsg, err := TestCodec.Parse(msg.Bytes(), dummyNodeID, dummyOnFinishedHandling)
-	assert.NoError(t, err)
-	assert.NotNil(t, parsedMsg)
-	assert.Equal(t, GetPeerList, parsedMsg.Op())
 }
 
 func TestBuildGetAcceptedFrontier(t *testing.T) {
@@ -292,6 +272,35 @@ func TestBuildChits(t *testing.T) {
 	assert.Equal(t, chainID[:], parsedMsg.Get(ChainID))
 	assert.Equal(t, requestID, parsedMsg.Get(RequestID))
 	assert.Equal(t, containerIDs, parsedMsg.Get(ContainerIDs))
+}
+
+func TestBuildChitsV2(t *testing.T) {
+	chainID := ids.Empty.Prefix(0)
+	requestID := uint32(5)
+	containerID := ids.Empty.Prefix(1)
+	containerIDs := [][]byte{containerID[:]}
+
+	msg := TestInboundMsgBuilder.InboundChitsV2(chainID, requestID, []ids.ID{containerID}, containerID, dummyNodeID)
+	assert.NotNil(t, msg)
+	assert.Equal(t, ChitsV2, msg.Op())
+	assert.Equal(t, chainID[:], msg.Get(ChainID))
+	assert.Equal(t, requestID, msg.Get(RequestID))
+	assert.Equal(t, containerIDs, msg.Get(ContainerIDs))
+	assert.Equal(t, containerID[:], msg.Get(ContainerID))
+
+	outboundMsg, err := UncompressingBuilder.ChitsV2(chainID, requestID, []ids.ID{containerID}, containerID)
+	assert.NoError(t, err)
+	assert.NotNil(t, outboundMsg)
+	assert.Equal(t, ChitsV2, outboundMsg.Op())
+
+	parsedMsg, err := TestCodec.Parse(outboundMsg.Bytes(), dummyNodeID, dummyOnFinishedHandling)
+	assert.NoError(t, err)
+	assert.NotNil(t, parsedMsg)
+	assert.Equal(t, ChitsV2, parsedMsg.Op())
+	assert.Equal(t, chainID[:], parsedMsg.Get(ChainID))
+	assert.Equal(t, requestID, parsedMsg.Get(RequestID))
+	assert.Equal(t, containerIDs, parsedMsg.Get(ContainerIDs))
+	assert.Equal(t, containerID[:], parsedMsg.Get(ContainerID))
 }
 
 func TestBuildAncestors(t *testing.T) {

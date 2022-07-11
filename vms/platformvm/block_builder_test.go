@@ -4,10 +4,13 @@
 package platformvm
 
 import (
+	"math"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/ava-labs/avalanchego/vms/platformvm/txs"
 )
 
 // shows that a locally generated CreateChainTx can be added to mempool and then
@@ -15,7 +18,7 @@ import (
 func TestBlockBuilderAddLocalTx(t *testing.T) {
 	assert := assert.New(t)
 
-	vm, _, _ := defaultVM()
+	vm, _, _, _ := defaultVM()
 	vm.ctx.Lock.Lock()
 	defer func() {
 		err := vm.Shutdown()
@@ -53,7 +56,7 @@ func TestBlockBuilderAddLocalTx(t *testing.T) {
 func TestBlockBuilderMaxMempoolSizeHandling(t *testing.T) {
 	assert := assert.New(t)
 
-	vm, _, _ := defaultVM()
+	vm, _, _, _ := defaultVM()
 	vm.ctx.Lock.Lock()
 	defer func() {
 		err := vm.Shutdown()
@@ -83,7 +86,7 @@ func TestBlockBuilderMaxMempoolSizeHandling(t *testing.T) {
 func TestPreviouslyDroppedTxsCanBeReAddedToMempool(t *testing.T) {
 	assert := assert.New(t)
 
-	vm, _, _ := defaultVM()
+	vm, _, _, _ := defaultVM()
 	vm.ctx.Lock.Lock()
 	defer func() {
 		err := vm.Shutdown()
@@ -98,11 +101,31 @@ func TestPreviouslyDroppedTxsCanBeReAddedToMempool(t *testing.T) {
 	tx := getValidTx(vm, t)
 	txID := tx.ID()
 
-	mempool.MarkDropped(txID)
-	assert.True(mempool.WasDropped(txID))
-
-	// show that re-added tx is not dropped anymore
+	// A tx simply added to mempool is obviously not marked as dropped
 	assert.NoError(mempool.Add(tx))
 	assert.True(mempool.Has(txID))
-	assert.False(mempool.WasDropped(txID))
+	_, isDropped := mempool.GetDropReason(txID)
+	assert.False(isDropped)
+
+	// When a tx is marked as dropped, it is still available to allow re-issuance
+	vm.mempool.MarkDropped(txID, "dropped for testing")
+	assert.True(mempool.Has(txID)) // still available
+	_, isDropped = mempool.GetDropReason(txID)
+	assert.True(isDropped)
+
+	// A previously dropped tx, popped then re-added to mempool,
+	// is not dropped anymore
+	switch tx.Unsigned.(type) {
+	case *txs.AddValidatorTx, *txs.AddDelegatorTx, *txs.AddSubnetValidatorTx:
+		mempool.PopProposalTx()
+	case *txs.CreateChainTx, *txs.CreateSubnetTx, *txs.ImportTx, *txs.ExportTx:
+		mempool.PopDecisionTxs(math.MaxInt64)
+	default:
+		t.Fatal("unknown tx type")
+	}
+	assert.NoError(mempool.Add(tx))
+
+	assert.True(mempool.Has(txID))
+	_, isDropped = mempool.GetDropReason(txID)
+	assert.False(isDropped)
 }

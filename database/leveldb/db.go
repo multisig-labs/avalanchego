@@ -7,6 +7,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sync"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/errors"
@@ -24,18 +28,25 @@ const (
 	// Name is the name of this database for database switches
 	Name = "leveldb"
 
-	// BlockCacheSize is the number of bytes to use for block caching in
+	// DefaultBlockCacheSize is the number of bytes to use for block caching in
 	// leveldb.
-	BlockCacheSize = 12 * opt.MiB
+	DefaultBlockCacheSize = 12 * opt.MiB
 
-	// WriteBufferSize is the number of bytes to use for buffers in leveldb.
-	WriteBufferSize = 12 * opt.MiB
+	// DefaultWriteBufferSize is the number of bytes to use for buffers in
+	// leveldb.
+	DefaultWriteBufferSize = 12 * opt.MiB
 
-	// HandleCap is the number of files descriptors to cap levelDB to use.
-	HandleCap = 64
+	// DefaultHandleCap is the number of files descriptors to cap levelDB to
+	// use.
+	DefaultHandleCap = 1024
 
-	// BitsPerKey is the number of bits to add to the bloom filter per key.
-	BitsPerKey = 10
+	// DefaultBitsPerKey is the number of bits to add to the bloom filter per
+	// key.
+	DefaultBitsPerKey = 10
+
+	// DefaultMetricUpdateFrequency is the frequency to poll the LevelDB
+	// metrics.
+	DefaultMetricUpdateFrequency = 10 * time.Second
 
 	// levelDBByteOverhead is the number of bytes of constant overhead that
 	// should be added to a batch size per operation.
@@ -53,61 +64,113 @@ var (
 // in binary-alphabetical order.
 type Database struct {
 	*leveldb.DB
-	closed utils.AtomicBool
+	// metrics is only initialized and used when [MetricUpdateFrequency] is >= 0
+	// in the config
+	metrics   metrics
+	closed    utils.AtomicBool
+	closeOnce sync.Once
+	// closeCh is closed when Close() is called.
+	closeCh chan struct{}
 }
 
 type config struct {
-	// BlockSize is the minimum uncompressed size in bytes of each 'sorted
-	// table' block.
+	// BlockCacheCapacity defines the capacity of the 'sorted table' block caching.
+	// Use -1 for zero, this has same effect as specifying NoCacher to BlockCacher.
+	//
+	// The default value is 12MiB.
 	BlockCacheCapacity int `json:"blockCacheCapacity"`
-	// BlockSize is the minimum uncompressed size in bytes of each 'sorted
-	// table' block.
+	// BlockSize is the minimum uncompressed size in bytes of each 'sorted table'
+	// block.
+	//
+	// The default value is 4KiB.
 	BlockSize int `json:"blockSize"`
-	// CompactionExpandLimitFactor limits compaction size after expanded.  This
-	// will be multiplied by table size limit at compaction target level.
+	// CompactionExpandLimitFactor limits compaction size after expanded.
+	// This will be multiplied by table size limit at compaction target level.
+	//
+	// The default value is 25.
 	CompactionExpandLimitFactor int `json:"compactionExpandLimitFactor"`
 	// CompactionGPOverlapsFactor limits overlaps in grandparent (Level + 2)
 	// that a single 'sorted table' generates.  This will be multiplied by
 	// table size limit at grandparent level.
+	//
+	// The default value is 10.
 	CompactionGPOverlapsFactor int `json:"compactionGPOverlapsFactor"`
 	// CompactionL0Trigger defines number of 'sorted table' at level-0 that will
 	// trigger compaction.
+	//
+	// The default value is 4.
 	CompactionL0Trigger int `json:"compactionL0Trigger"`
-	// CompactionSourceLimitFactor limits compaction source size. This doesn't
-	// apply to level-0.  This will be multiplied by table size limit at
-	// compaction target level.
+	// CompactionSourceLimitFactor limits compaction source size. This doesn't apply to
+	// level-0.
+	// This will be multiplied by table size limit at compaction target level.
+	//
+	// The default value is 1.
 	CompactionSourceLimitFactor int `json:"compactionSourceLimitFactor"`
-	// CompactionTableSize limits size of 'sorted table' that compaction
-	// generates.  The limits for each level will be calculated as:
+	// CompactionTableSize limits size of 'sorted table' that compaction generates.
+	// The limits for each level will be calculated as:
 	//   CompactionTableSize * (CompactionTableSizeMultiplier ^ Level)
-	// The multiplier for each level can also fine-tuned using
-	// CompactionTableSizeMultiplierPerLevel.
+	// The multiplier for each level can also fine-tuned using CompactionTableSizeMultiplierPerLevel.
+	//
+	// The default value is 2MiB.
 	CompactionTableSize int `json:"compactionTableSize"`
 	// CompactionTableSizeMultiplier defines multiplier for CompactionTableSize.
-	CompactionTableSizeMultiplier         float64   `json:"compactionTableSizeMultiplier"`
+	//
+	// The default value is 1.
+	CompactionTableSizeMultiplier float64 `json:"compactionTableSizeMultiplier"`
+	// CompactionTableSizeMultiplierPerLevel defines per-level multiplier for
+	// CompactionTableSize.
+	// Use zero to skip a level.
+	//
+	// The default value is nil.
 	CompactionTableSizeMultiplierPerLevel []float64 `json:"compactionTableSizeMultiplierPerLevel"`
 	// CompactionTotalSize limits total size of 'sorted table' for each level.
 	// The limits for each level will be calculated as:
 	//   CompactionTotalSize * (CompactionTotalSizeMultiplier ^ Level)
 	// The multiplier for each level can also fine-tuned using
 	// CompactionTotalSizeMultiplierPerLevel.
+	//
+	// The default value is 10MiB.
 	CompactionTotalSize int `json:"compactionTotalSize"`
 	// CompactionTotalSizeMultiplier defines multiplier for CompactionTotalSize.
+	//
+	// The default value is 10.
 	CompactionTotalSizeMultiplier float64 `json:"compactionTotalSizeMultiplier"`
+	// DisableSeeksCompaction allows disabling 'seeks triggered compaction'.
+	// The purpose of 'seeks triggered compaction' is to optimize database so
+	// that 'level seeks' can be minimized, however this might generate many
+	// small compaction which may not preferable.
+	//
+	// The default is true.
+	DisableSeeksCompaction bool `json:"disableSeeksCompaction"`
 	// OpenFilesCacheCapacity defines the capacity of the open files caching.
+	// Use -1 for zero, this has same effect as specifying NoCacher to OpenFilesCacher.
+	//
+	// The default value is 1024.
 	OpenFilesCacheCapacity int `json:"openFilesCacheCapacity"`
-	// There are two buffers of size WriteBuffer used.
+	// WriteBuffer defines maximum size of a 'memdb' before flushed to
+	// 'sorted table'. 'memdb' is an in-memory DB backed by an on-disk
+	// unsorted journal.
+	//
+	// LevelDB may held up to two 'memdb' at the same time.
+	//
+	// The default value is 6MiB.
 	WriteBuffer      int `json:"writeBuffer"`
 	FilterBitsPerKey int `json:"filterBitsPerKey"`
+
+	// MetricUpdateFrequency is the frequency to poll LevelDB metrics.
+	// If <= 0, LevelDB metrics aren't polled.
+	MetricUpdateFrequency time.Duration `json:"metricUpdateFrequency"`
 }
 
 // New returns a wrapped LevelDB object.
-func New(file string, configBytes []byte, log logging.Logger) (database.Database, error) {
+func New(file string, configBytes []byte, log logging.Logger, namespace string, reg prometheus.Registerer) (database.Database, error) {
 	parsedConfig := config{
-		BlockCacheCapacity:     BlockCacheSize,
-		OpenFilesCacheCapacity: HandleCap,
-		WriteBuffer:            WriteBufferSize / 2,
-		FilterBitsPerKey:       BitsPerKey,
+		BlockCacheCapacity:     DefaultBlockCacheSize,
+		DisableSeeksCompaction: true,
+		OpenFilesCacheCapacity: DefaultHandleCap,
+		WriteBuffer:            DefaultWriteBufferSize / 2,
+		FilterBitsPerKey:       DefaultBitsPerKey,
+		MetricUpdateFrequency:  DefaultMetricUpdateFrequency,
 	}
 	if len(configBytes) > 0 {
 		if err := json.Unmarshal(configBytes, &parsedConfig); err != nil {
@@ -132,6 +195,7 @@ func New(file string, configBytes []byte, log logging.Logger) (database.Database
 		CompactionTableSizeMultiplier: parsedConfig.CompactionTableSizeMultiplier,
 		CompactionTotalSize:           parsedConfig.CompactionTotalSize,
 		CompactionTotalSizeMultiplier: parsedConfig.CompactionTotalSizeMultiplier,
+		DisableSeeksCompaction:        parsedConfig.DisableSeeksCompaction,
 		OpenFilesCacheCapacity:        parsedConfig.OpenFilesCacheCapacity,
 		WriteBuffer:                   parsedConfig.WriteBuffer,
 		Filter:                        filter.NewBloomFilter(parsedConfig.FilterBitsPerKey),
@@ -139,9 +203,41 @@ func New(file string, configBytes []byte, log logging.Logger) (database.Database
 	if _, corrupted := err.(*errors.ErrCorrupted); corrupted {
 		db, err = leveldb.RecoverFile(file, nil)
 	}
-	return &Database{
-		DB: db,
-	}, err
+	if err != nil {
+		return nil, err
+	}
+
+	wrappedDB := &Database{
+		DB:      db,
+		closeCh: make(chan struct{}),
+	}
+	if parsedConfig.MetricUpdateFrequency > 0 {
+		metrics, err := newMetrics(namespace, reg)
+		if err != nil {
+			// Drop any close error to report the original error
+			_ = db.Close()
+			return nil, err
+		}
+		wrappedDB.metrics = metrics
+		go func() {
+			t := time.NewTicker(parsedConfig.MetricUpdateFrequency)
+			defer t.Stop()
+
+			for {
+				err := wrappedDB.updateMetrics()
+				if !wrappedDB.closed.GetValue() && err != nil {
+					log.Warn("failed to update leveldb metrics: %s", err)
+				}
+
+				select {
+				case <-t.C:
+				case <-wrappedDB.closeCh:
+					return
+				}
+			}
+		}()
+	}
+	return wrappedDB, nil
 }
 
 // Has returns if the key is set in the database
@@ -210,12 +306,6 @@ func (db *Database) NewIteratorWithStartAndPrefix(start, prefix []byte) database
 	}
 }
 
-// Stat returns a particular internal stat of the database.
-func (db *Database) Stat(property string) (string, error) {
-	stat, err := db.DB.GetProperty(property)
-	return stat, updateError(err)
-}
-
 // This comment is basically copy pasted from the underlying levelDB library:
 
 // Compact the underlying DB for the given key range.
@@ -231,10 +321,19 @@ func (db *Database) Compact(start []byte, limit []byte) error {
 	return updateError(db.DB.CompactRange(util.Range{Start: start, Limit: limit}))
 }
 
-// Close implements the Database interface
 func (db *Database) Close() error {
 	db.closed.SetValue(true)
+	db.closeOnce.Do(func() {
+		close(db.closeCh)
+	})
 	return updateError(db.DB.Close())
+}
+
+func (db *Database) HealthCheck() (interface{}, error) {
+	if db.closed.GetValue() {
+		return nil, database.ErrClosed
+	}
+	return nil, nil
 }
 
 // batch is a wrapper around a levelDB batch to contain sizes.
@@ -332,7 +431,6 @@ func (it *iter) Next() bool {
 	return hasNext
 }
 
-// Error implements the Iterator interface
 func (it *iter) Error() error {
 	if it.err != nil {
 		return it.err
@@ -340,10 +438,8 @@ func (it *iter) Error() error {
 	return updateError(it.Iterator.Error())
 }
 
-// Key implements the Iterator interface
 func (it *iter) Key() []byte { return it.key }
 
-// Value implements the Iterator interface
 func (it *iter) Value() []byte { return it.val }
 
 func updateError(err error) error {

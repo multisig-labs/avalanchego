@@ -9,17 +9,20 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/snow/consensus/snowman"
 	"github.com/ava-labs/avalanchego/utils/metric"
 	"github.com/ava-labs/avalanchego/utils/wrappers"
+	"github.com/ava-labs/avalanchego/vms/platformvm/txs"
 )
 
 var errUnknownBlockType = errors.New("unknown block type")
 
 type metrics struct {
-	percentConnected prometheus.Gauge
-	localStake       prometheus.Gauge
-	totalStake       prometheus.Gauge
+	percentConnected       prometheus.Gauge
+	subnetPercentConnected *prometheus.GaugeVec
+	localStake             prometheus.Gauge
+	totalStake             prometheus.Gauge
 
 	numAbortBlocks,
 	numAtomicBlocks,
@@ -67,12 +70,21 @@ func newTxMetrics(namespace string, name string) prometheus.Counter {
 func (m *metrics) Initialize(
 	namespace string,
 	registerer prometheus.Registerer,
+	whitelistedSubnets ids.Set,
 ) error {
 	m.percentConnected = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "percent_connected",
 		Help:      "Percent of connected stake",
 	})
+	m.subnetPercentConnected = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "percent_connected_subnet",
+			Help:      "Percent of connected subnet weight",
+		},
+		[]string{"subnetID"},
+	)
 	m.localStake = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace,
 		Name:      "local_staked",
@@ -139,6 +151,7 @@ func (m *metrics) Initialize(
 		err,
 
 		registerer.Register(m.percentConnected),
+		registerer.Register(m.subnetPercentConnected),
 		registerer.Register(m.localStake),
 		registerer.Register(m.totalStake),
 
@@ -166,6 +179,12 @@ func (m *metrics) Initialize(
 		registerer.Register(m.validatorSetsHeightDiff),
 		registerer.Register(m.validatorSetsDuration),
 	)
+
+	// init subnet tracker metrics with whitelisted subnets
+	for subnetID := range whitelistedSubnets {
+		// initialize to 0
+		m.subnetPercentConnected.WithLabelValues(subnetID.String()).Set(0)
+	}
 	return errs.Err
 }
 
@@ -175,12 +194,12 @@ func (m *metrics) AcceptBlock(b snowman.Block) error {
 		m.numAbortBlocks.Inc()
 	case *AtomicBlock:
 		m.numAtomicBlocks.Inc()
-		return m.AcceptTx(&b.Tx)
+		return m.AcceptTx(b.Tx)
 	case *CommitBlock:
 		m.numCommitBlocks.Inc()
 	case *ProposalBlock:
 		m.numProposalBlocks.Inc()
-		return m.AcceptTx(&b.Tx)
+		return m.AcceptTx(b.Tx)
 	case *StandardBlock:
 		m.numStandardBlocks.Inc()
 		for _, tx := range b.Txs {
@@ -194,28 +213,28 @@ func (m *metrics) AcceptBlock(b snowman.Block) error {
 	return nil
 }
 
-func (m *metrics) AcceptTx(tx *Tx) error {
-	switch tx.UnsignedTx.(type) {
-	case *UnsignedAddDelegatorTx:
+func (m *metrics) AcceptTx(tx *txs.Tx) error {
+	switch tx.Unsigned.(type) {
+	case *txs.AddDelegatorTx:
 		m.numAddDelegatorTxs.Inc()
-	case *UnsignedAddSubnetValidatorTx:
+	case *txs.AddSubnetValidatorTx:
 		m.numAddSubnetValidatorTxs.Inc()
-	case *UnsignedAddValidatorTx:
+	case *txs.AddValidatorTx:
 		m.numAddValidatorTxs.Inc()
-	case *UnsignedAdvanceTimeTx:
+	case *txs.AdvanceTimeTx:
 		m.numAdvanceTimeTxs.Inc()
-	case *UnsignedCreateChainTx:
+	case *txs.CreateChainTx:
 		m.numCreateChainTxs.Inc()
-	case *UnsignedCreateSubnetTx:
+	case *txs.CreateSubnetTx:
 		m.numCreateSubnetTxs.Inc()
-	case *UnsignedImportTx:
+	case *txs.ImportTx:
 		m.numImportTxs.Inc()
-	case *UnsignedExportTx:
+	case *txs.ExportTx:
 		m.numExportTxs.Inc()
-	case *UnsignedRewardValidatorTx:
+	case *txs.RewardValidatorTx:
 		m.numRewardValidatorTxs.Inc()
 	default:
-		return errUnknownTxType
+		return fmt.Errorf("%w: %T", errUnknownTxType, tx.Unsigned)
 	}
 	return nil
 }

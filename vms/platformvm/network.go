@@ -10,9 +10,9 @@ import (
 	"github.com/ava-labs/avalanchego/cache"
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/snow/engine/common"
-	"github.com/ava-labs/avalanchego/utils/constants"
 	"github.com/ava-labs/avalanchego/utils/logging"
 	"github.com/ava-labs/avalanchego/vms/platformvm/message"
+	"github.com/ava-labs/avalanchego/vms/platformvm/txs"
 )
 
 const (
@@ -44,28 +44,28 @@ func newNetwork(activationTime time.Time, appSender common.AppSender, vm *VM) *n
 	return n
 }
 
-func (n *network) AppRequestFailed(nodeID ids.ShortID, requestID uint32) error {
+func (n *network) AppRequestFailed(nodeID ids.NodeID, requestID uint32) error {
 	// This VM currently only supports gossiping of txs, so there are no
 	// requests.
 	return nil
 }
 
-func (n *network) AppRequest(nodeID ids.ShortID, requestID uint32, deadline time.Time, msgBytes []byte) error {
+func (n *network) AppRequest(nodeID ids.NodeID, requestID uint32, deadline time.Time, msgBytes []byte) error {
 	// This VM currently only supports gossiping of txs, so there are no
 	// requests.
 	return nil
 }
 
-func (n *network) AppResponse(nodeID ids.ShortID, requestID uint32, msgBytes []byte) error {
+func (n *network) AppResponse(nodeID ids.NodeID, requestID uint32, msgBytes []byte) error {
 	// This VM currently only supports gossiping of txs, so there are no
 	// requests.
 	return nil
 }
 
-func (n *network) AppGossip(nodeID ids.ShortID, msgBytes []byte) error {
+func (n *network) AppGossip(nodeID ids.NodeID, msgBytes []byte) error {
 	n.log.Debug(
 		"AppGossip message handler called from %s with %d bytes",
-		nodeID.PrefixedString(constants.NodeIDPrefix),
+		nodeID,
 		len(msgBytes),
 	)
 
@@ -84,22 +84,16 @@ func (n *network) AppGossip(nodeID ids.ShortID, msgBytes []byte) error {
 	if !ok {
 		n.log.Debug(
 			"dropping unexpected message from %s",
-			nodeID.PrefixedString(constants.NodeIDPrefix),
+			nodeID,
 		)
 		return nil
 	}
 
-	tx := &Tx{}
-	if _, err := Codec.Unmarshal(msg.Tx, tx); err != nil {
+	tx, err := txs.Parse(Codec, msg.Tx)
+	if err != nil {
 		n.log.Verbo("AppGossip provided invalid tx: %s", err)
 		return nil
 	}
-	unsignedBytes, err := Codec.Marshal(CodecVersion, &tx.UnsignedTx)
-	if err != nil {
-		n.log.Warn("AppGossip failed to marshal unsigned tx: %s", err)
-		return nil
-	}
-	tx.Initialize(unsignedBytes, msg.Tx)
 
 	txID := tx.ID()
 
@@ -108,7 +102,7 @@ func (n *network) AppGossip(nodeID ids.ShortID, msgBytes []byte) error {
 	n.vm.ctx.Lock.Lock()
 	defer n.vm.ctx.Lock.Unlock()
 
-	if n.mempool.WasDropped(txID) {
+	if _, dropped := n.mempool.GetDropReason(txID); dropped {
 		// If the tx is being dropped - just ignore it
 		return nil
 	}
@@ -116,15 +110,15 @@ func (n *network) AppGossip(nodeID ids.ShortID, msgBytes []byte) error {
 	// add to mempool
 	if err = n.mempool.AddUnverifiedTx(tx); err != nil {
 		n.log.Debug(
-			"AppResponse failed AddUnverifiedTx from %s with: %s",
-			nodeID.PrefixedString(constants.NodeIDPrefix),
+			"AppResponse failed AddUnverifiedTx from %s: %s",
+			nodeID,
 			err,
 		)
 	}
 	return nil
 }
 
-func (n *network) GossipTx(tx *Tx) error {
+func (n *network) GossipTx(tx *txs.Tx) error {
 	txID := tx.ID()
 	// Don't gossip a transaction if it has been recently gossiped.
 	if _, has := n.recentTxs.Get(txID); has {
@@ -134,12 +128,10 @@ func (n *network) GossipTx(tx *Tx) error {
 
 	n.log.Debug("gossiping tx %s", txID)
 
-	msg := &message.Tx{
-		Tx: tx.Bytes(),
-	}
+	msg := &message.Tx{Tx: tx.Bytes()}
 	msgBytes, err := message.Build(msg)
 	if err != nil {
-		return fmt.Errorf("GossipTx: failed to build Tx message with: %w", err)
+		return fmt.Errorf("GossipTx: failed to build Tx message: %w", err)
 	}
 	return n.appSender.SendAppGossip(msgBytes)
 }

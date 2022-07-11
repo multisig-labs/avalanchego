@@ -6,6 +6,8 @@ package snowstorm
 import (
 	"fmt"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/snow"
 	"github.com/ava-labs/avalanchego/snow/choices"
@@ -16,20 +18,24 @@ import (
 	sbcon "github.com/ava-labs/avalanchego/snow/consensus/snowball"
 )
 
-var _ Consensus = &Directed{}
+var (
+	_ Factory   = &DirectedFactory{}
+	_ Consensus = &Directed{}
+)
 
 // DirectedFactory implements Factory by returning a directed struct
 type DirectedFactory struct{}
 
-// New implements Factory
 func (DirectedFactory) New() Consensus { return &Directed{} }
 
 // Directed is an implementation of a multi-color, non-transitive, snowball
 // instance
 type Directed struct {
-	// metrics that describe this consensus instance
-	metrics.Latency
 	metrics.Polls
+	metrics.Latency
+	whitelistTxLatency metrics.Latency
+	numVirtuousTxs     prometheus.Gauge
+	numRogueTxs        prometheus.Gauge
 
 	// context that this consensus instance is executing in
 	ctx *snow.ConsensusContext
@@ -89,7 +95,6 @@ type directedTx struct {
 	tx Tx
 }
 
-// Initialize implements the Consensus interface
 func (dg *Directed) Initialize(
 	ctx *snow.ConsensusContext,
 	params sbcon.Parameters,
@@ -97,11 +102,38 @@ func (dg *Directed) Initialize(
 	dg.ctx = ctx
 	dg.params = params
 
-	if err := dg.Latency.Initialize("txs", "transaction(s)", ctx.Log, "", ctx.Registerer); err != nil {
-		return fmt.Errorf("failed to initialize latency metrics: %w", err)
+	var err error
+	dg.Polls, err = metrics.NewPolls("", ctx.Registerer)
+	if err != nil {
+		return fmt.Errorf("failed to create poll metrics: %w", err)
 	}
-	if err := dg.Polls.Initialize("", ctx.Registerer); err != nil {
-		return fmt.Errorf("failed to initialize poll metrics: %w", err)
+
+	dg.Latency, err = metrics.NewLatency("txs", "transaction(s)", ctx.Log, "", ctx.Registerer)
+	if err != nil {
+		return fmt.Errorf("failed to create latency metrics: %w", err)
+	}
+
+	dg.whitelistTxLatency, err = metrics.NewLatency("whitelist_tx", "whitelist transaction(s)", ctx.Log, "", ctx.Registerer)
+	if err != nil {
+		return fmt.Errorf("failed to create whitelist tx metrics: %w", err)
+	}
+
+	dg.numVirtuousTxs = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "virtuous_tx_processing",
+		Help: "Number of currently processing virtuous transaction(s)",
+	})
+	err = ctx.Registerer.Register(dg.numVirtuousTxs)
+	if err != nil {
+		return fmt.Errorf("failed to create virtuous tx metrics: %w", err)
+	}
+
+	dg.numRogueTxs = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "rogue_tx_processing",
+		Help: "Number of currently processing rogue transaction(s)",
+	})
+	err = ctx.Registerer.Register(dg.numRogueTxs)
+	if err != nil {
+		return fmt.Errorf("failed to create rogue tx metrics: %w", err)
 	}
 
 	dg.txs = make(map[ids.ID]*directedTx)
@@ -111,18 +143,14 @@ func (dg *Directed) Initialize(
 	return params.Verify()
 }
 
-// Parameters implements the Snowstorm interface
 func (dg *Directed) Parameters() sbcon.Parameters { return dg.params }
 
-// Virtuous implements the ConflictGraph interface
 func (dg *Directed) Virtuous() ids.Set { return dg.virtuous }
 
-// Preferences implements the ConflictGraph interface
 func (dg *Directed) Preferences() ids.Set { return dg.preferences }
 
 func (dg *Directed) VirtuousVoting() ids.Set { return dg.virtuousVoting }
 
-// Quiesce implements the ConflictGraph interface
 func (dg *Directed) Quiesce() bool {
 	numVirtuous := dg.virtuousVoting.Len()
 	dg.ctx.Log.Verbo("Conflict graph has %d voting virtuous transactions",
@@ -130,7 +158,6 @@ func (dg *Directed) Quiesce() bool {
 	return numVirtuous == 0
 }
 
-// Finalized implements the ConflictGraph interface
 func (dg *Directed) Finalized() bool {
 	numPreferences := dg.preferences.Len()
 	dg.ctx.Log.Verbo("Conflict graph has %d preferred transactions",
@@ -140,7 +167,7 @@ func (dg *Directed) Finalized() bool {
 
 // HealthCheck returns information about the consensus health.
 func (dg *Directed) HealthCheck() (interface{}, error) {
-	numOutstandingTxs := dg.Latency.ProcessingLen()
+	numOutstandingTxs := dg.Latency.NumProcessing()
 	isOutstandingTxs := numOutstandingTxs <= dg.params.MaxOutstandingItems
 	details := map[string]interface{}{
 		"outstandingTransactions": numOutstandingTxs,
@@ -162,18 +189,14 @@ func (dg *Directed) shouldVote(tx Tx) (bool, error) {
 	}
 
 	txID := tx.ID()
-	bytes := tx.Bytes()
-
-	// Notify the IPC socket that this tx has been issued if the transaction has
-	// a binary format.
-	if len(bytes) > 0 {
-		if err := dg.ctx.DecisionDispatcher.Issue(dg.ctx, txID, bytes); err != nil {
-			return false, err
-		}
-	}
 
 	// Notify the metrics that this transaction is being issued.
-	dg.Latency.Issued(txID, dg.pollNumber)
+	if tx.HasWhitelist() {
+		dg.ctx.Log.Info("whitelist tx successfully issued %s", txID)
+		dg.whitelistTxLatency.Issued(txID, dg.pollNumber)
+	} else {
+		dg.Latency.Issued(txID, dg.pollNumber)
+	}
 
 	// If this tx has inputs, it needs to be voted on before being accepted.
 	if inputs := tx.InputIDs(); len(inputs) != 0 {
@@ -184,12 +207,12 @@ func (dg *Directed) shouldVote(tx Tx) (bool, error) {
 	// any conflicting transactions. Therefore, this transaction is treated as
 	// vacuously accepted and doesn't need to be voted on.
 
-	// Notify those listening for accepted txs if the transaction has
-	// a binary format.
-	if len(bytes) > 0 {
-		// Note that DecisionDispatcher.Accept must be called before
-		// tx.Accept to honor EventDispatcher.Accept's invariant.
-		if err := dg.ctx.DecisionDispatcher.Accept(dg.ctx, txID, bytes); err != nil {
+	// Notify those listening for accepted txs if the transaction has a binary
+	// format.
+	if bytes := tx.Bytes(); len(bytes) > 0 {
+		// Note that DecisionAcceptor.Accept must be called before tx.Accept to
+		// honor Acceptor.Accept's invariant.
+		if err := dg.ctx.DecisionAcceptor.Accept(dg.ctx, txID, bytes); err != nil {
 			return false, err
 		}
 	}
@@ -203,17 +226,16 @@ func (dg *Directed) shouldVote(tx Tx) (bool, error) {
 	return false, nil
 }
 
-// IsVirtuous implements the Consensus interface
 func (dg *Directed) IsVirtuous(tx Tx) bool {
 	txID := tx.ID()
-	// If the tx is currently processing, we should just return if was
+	// If the tx is currently processing, we should just return whether it was
 	// registered as rogue or not.
 	if node, exists := dg.txs[txID]; exists {
 		return !node.rogue
 	}
 
-	// The tx isn't processing, so we need to check to see if it conflicts with
-	// any of the other txs that are currently processing.
+	// The tx isn't processing, so we need to check if it conflicts with any of
+	// the other txs that are currently processing.
 	for _, utxoID := range tx.InputIDs() {
 		if _, exists := dg.utxos[utxoID]; exists {
 			// A currently processing tx names the same input as the provided
@@ -226,13 +248,14 @@ func (dg *Directed) IsVirtuous(tx Tx) bool {
 	return true
 }
 
-// Conflicts implements the Consensus interface
 func (dg *Directed) Conflicts(tx Tx) ids.Set {
 	var conflicts ids.Set
 	if node, exists := dg.txs[tx.ID()]; exists {
 		// If the tx is currently processing, the conflicting txs are just the
 		// union of the inbound conflicts and the outbound conflicts.
-		// Only bother to call Union, which will do a memory allocation, if ins or outs are non-empty.
+		//
+		// Only bother to call Union, which will do a memory allocation, if ins
+		// or outs are non-empty.
 		if node.ins.Len() > 0 || node.outs.Len() > 0 {
 			conflicts.Union(node.ins)
 			conflicts.Union(node.outs)
@@ -249,7 +272,6 @@ func (dg *Directed) Conflicts(tx Tx) ids.Set {
 	return conflicts
 }
 
-// Add implements the Consensus interface
 func (dg *Directed) Add(tx Tx) error {
 	if shouldVote, err := dg.shouldVote(tx); !shouldVote || err != nil {
 		return err
@@ -265,24 +287,27 @@ func (dg *Directed) Add(tx Tx) error {
 			otherNode := dg.txs[otherID]
 
 			// The [otherNode] should be preferred over [txNode] because a newly
-			// issued transaction's confidence is always 0 and times are broken
-			// by first issued.
+			// issued transaction's confidence is always 0 and ties are broken
+			// by the issuance order ("other_node" was issued before "tx_node").
 			dg.addEdge(txNode, otherNode)
 		}
 	}
-	whitelist, isWhitelist, err := tx.Whitelist()
-	if err != nil {
-		return err
-	}
-	if isWhitelist {
+	if tx.HasWhitelist() {
+		whitelist, err := tx.Whitelist()
+		if err != nil {
+			return err
+		}
+		dg.ctx.Log.Info("processing whitelist tx %s", txID)
+
 		// Find all transactions that are not explicitly whitelisted and mark
 		// them as conflicting.
 		for otherID, otherNode := range dg.txs {
 			// [otherID] is not whitelisted by [whitelist]
 			if !whitelist.Contains(otherID) {
 				// The [otherNode] should be preferred over [txNode] because a
-				// newly issued transaction's confidence is always 0 and times
-				// are broken by first issued.
+				// newly issued transaction's confidence is always 0 and ties
+				// are broken by the issuance order ("other_node" was issued
+				// before "tx_node").
 				dg.addEdge(txNode, otherNode)
 			}
 		}
@@ -305,9 +330,9 @@ func (dg *Directed) Add(tx Tx) error {
 			conflict := dg.txs[conflictIDKey]
 
 			// Add all the txs that spend this UTXO to this txs conflicts. These
-			// conflicting txs must be preferred over this tx. We know this because
-			// this tx currently has a bias of 0 and the tie goes to the tx whose
-			// bias was updated first.
+			// conflicting txs must be preferred over this tx. We know this
+			// because this tx currently has a bias of 0 and the tie goes to the
+			// tx whose bias was updated first.
 			dg.addEdge(txNode, conflict)
 		}
 
@@ -318,9 +343,8 @@ func (dg *Directed) Add(tx Tx) error {
 		dg.utxos[inputID] = spenders
 	}
 
-	// Mark this transaction as rogue if had any conflicts registered above
+	// Mark this transaction as rogue if it had any conflicts registered above
 	txNode.rogue = txNode.outs.Len() != 0
-
 	if !txNode.rogue {
 		// If this tx is currently virtuous, add it to the virtuous sets
 		dg.virtuous.Add(txID)
@@ -335,7 +359,12 @@ func (dg *Directed) Add(tx Tx) error {
 
 	// If a tx that this tx depends on is rejected, this tx should also be
 	// rejected.
-	return dg.registerRejector(tx)
+	err := dg.registerRejector(tx)
+
+	numVirtuous := dg.virtuous.Len()
+	dg.numVirtuousTxs.Set(float64(numVirtuous))
+	dg.numRogueTxs.Set(float64(len(dg.txs) - numVirtuous))
+	return err
 }
 
 // addEdge between the [src] and [dst] txs to represent a conflict.
@@ -366,13 +395,16 @@ func (dg *Directed) addEdge(src, dst *directedTx) {
 }
 
 func (dg *Directed) Remove(txID ids.ID) error {
-	s := ids.Set{
+	err := dg.reject(ids.Set{
 		txID: struct{}{},
-	}
-	return dg.reject(s)
+	})
+
+	numVirtuous := dg.virtuous.Len()
+	dg.numVirtuousTxs.Set(float64(numVirtuous))
+	dg.numRogueTxs.Set(float64(len(dg.txs) - numVirtuous))
+	return err
 }
 
-// Issued implements the Consensus interface
 func (dg *Directed) Issued(tx Tx) bool {
 	// If the tx is either Accepted or Rejected, then it must have been issued
 	// previously.
@@ -385,7 +417,6 @@ func (dg *Directed) Issued(tx Tx) bool {
 	return ok
 }
 
-// RecordPoll implements the Consensus interface
 func (dg *Directed) RecordPoll(votes ids.Bag) (bool, error) {
 	// Increase the vote ID. This is only updated here and is used to reset the
 	// confidence values of transactions lazily.
@@ -406,18 +437,18 @@ func (dg *Directed) RecordPoll(votes ids.Bag) (bool, error) {
 		// Get the node this tx represents
 		txNode, exist := dg.txs[txIDKey]
 		if !exist {
-			// This tx may have already been accepted because of tx
+			// This tx may have already been accepted because of its
 			// dependencies. If this is the case, we can just drop the vote.
 			continue
 		}
 
-		txNode.RecordSuccessfulPoll(dg.pollNumber)
+		txNode.recordSuccessfulPoll(dg.pollNumber)
 
 		// If the tx should be accepted, then we should defer its acceptance
 		// until its dependencies are decided. If this tx was already marked to
 		// be accepted, we shouldn't register it again.
 		if !txNode.pendingAccept &&
-			txNode.Finalized(dg.params.BetaVirtuous, dg.params.BetaRogue) {
+			txNode.finalized(dg.params.BetaVirtuous, dg.params.BetaRogue) {
 			// Mark that this tx is pending acceptance so acceptance is only
 			// registered once.
 			txNode.pendingAccept = true
@@ -447,6 +478,10 @@ func (dg *Directed) RecordPoll(votes ids.Bag) (bool, error) {
 			dg.Successful()
 		}
 	}
+
+	numVirtuous := dg.virtuous.Len()
+	dg.numVirtuousTxs.Set(float64(numVirtuous))
+	dg.numRogueTxs.Set(float64(len(dg.txs) - numVirtuous))
 	return changed, dg.errs.Err
 }
 
@@ -456,7 +491,7 @@ func (dg *Directed) String() string {
 		nodes = append(nodes, &snowballNode{
 			txID:               txNode.tx.ID(),
 			numSuccessfulPolls: txNode.numSuccessfulPolls,
-			confidence:         txNode.Confidence(dg.pollNumber),
+			confidence:         txNode.getConfidence(dg.pollNumber),
 		})
 	}
 	return consensusString(nodes)
@@ -484,9 +519,8 @@ func (dg *Directed) accept(txID ids.ID) error {
 	if err := dg.reject(txNode.ins); err != nil {
 		return err
 	}
-	// While it is typically true that a tx this is being accepted is preferred,
-	// it is possible for this to not be the case. So this is handled for
-	// completeness.
+	// While it is typically true that a tx that is being accepted is preferred,
+	// it is possible for this to not be the case.
 	if err := dg.reject(txNode.outs); err != nil {
 		return err
 	}
@@ -551,9 +585,14 @@ func (dg *Directed) redirectEdges(tx *directedTx) bool {
 	return changed
 }
 
-// Change the direction of this edge if needed. Returns true if the direction
-// was switched.
-// TODO replace
+// Fixes the direction of the edge between [txNode] and [conflictID] if needed.
+//
+// It is assumed the edge is currently directed as [txNode] -> [conflictID].
+//
+// If [conflictID] has less successful polls than [txNode], the direction of the
+// edge will be set to [conflictID] -> [txNode].
+//
+// Returns true if the direction was switched.
 func (dg *Directed) redirectEdge(txNode *directedTx, conflictID ids.ID) bool {
 	conflict := dg.txs[conflictID]
 	if txNode.numSuccessfulPolls <= conflict.numSuccessfulPolls {
@@ -608,9 +647,9 @@ func (dg *Directed) acceptTx(tx Tx) error {
 	// Notify those listening that this tx has been accepted if the transaction
 	// has a binary format.
 	if bytes := tx.Bytes(); len(bytes) > 0 {
-		// Note that DecisionDispatcher.Accept must be called before
-		// tx.Accept to honor EventDispatcher.Accept's invariant.
-		if err := dg.ctx.DecisionDispatcher.Accept(dg.ctx, txID, bytes); err != nil {
+		// Note that DecisionAcceptor.Accept must be called before tx.Accept to
+		// honor Acceptor.Accept's invariant.
+		if err := dg.ctx.DecisionAcceptor.Accept(dg.ctx, txID, bytes); err != nil {
 			return err
 		}
 	}
@@ -620,7 +659,14 @@ func (dg *Directed) acceptTx(tx Tx) error {
 	}
 
 	// Update the metrics to account for this transaction's acceptance
-	dg.Latency.Accepted(txID, dg.pollNumber)
+	if tx.HasWhitelist() {
+		dg.ctx.Log.Info("whitelist tx accepted %s", txID)
+		dg.whitelistTxLatency.Accepted(txID, dg.pollNumber)
+	} else {
+		// just regular tx
+		dg.Latency.Accepted(txID, dg.pollNumber)
+	}
+
 	// If there is a tx that was accepted pending on this tx, the ancestor
 	// should be notified that it doesn't need to block on this tx anymore.
 	dg.pendingAccept.Fulfill(txID)
@@ -642,22 +688,19 @@ func (dg *Directed) rejectTx(tx Tx) error {
 		return err
 	}
 
-	// Notify the IPC that the tx was rejected if the transaction has a binary
-	// format.
-	if bytes := tx.Bytes(); len(bytes) > 0 {
-		if err := dg.ctx.DecisionDispatcher.Reject(dg.ctx, txID, bytes); err != nil {
-			return err
-		}
+	// Update the metrics to account for this transaction's rejection
+	if tx.HasWhitelist() {
+		dg.ctx.Log.Info("whitelist tx rejected %s", txID)
+		dg.whitelistTxLatency.Rejected(txID, dg.pollNumber)
+	} else {
+		dg.Latency.Rejected(txID, dg.pollNumber)
 	}
 
-	// Update the metrics to account for this transaction's rejection
-	dg.Latency.Rejected(txID, dg.pollNumber)
-
-	// If there is a tx that was accepted pending on this tx, the ancestor
-	// tx can't be accepted.
+	// If there is a tx that was accepted pending on this tx, the ancestor tx
+	// can't be accepted.
 	dg.pendingAccept.Abandon(txID)
-	// If there is a tx that was issued pending on this tx, the ancestor tx
-	// must be rejected.
+	// If there is a tx that was issued pending on this tx, the ancestor tx must
+	// be rejected.
 	dg.pendingReject.Fulfill(txID)
 	return nil
 }

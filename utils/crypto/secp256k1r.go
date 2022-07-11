@@ -6,7 +6,9 @@ package crypto
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"sort"
+	"strings"
 
 	stdecdsa "crypto/ecdsa"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/ava-labs/avalanchego/cache"
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/utils"
+	"github.com/ava-labs/avalanchego/utils/cb58"
 	"github.com/ava-labs/avalanchego/utils/hashing"
 )
 
@@ -40,19 +43,29 @@ const (
 	// picked to avoid a binary representation that would allow compact
 	// signatures to be mistaken for other components.
 	compactSigMagicOffset = 27
+
+	PrivateKeyPrefix = "PrivateKey-"
+	nullStr          = "null"
 )
 
-var errCompressed = errors.New("wasn't expecting a compresses key")
+var (
+	errCompressed              = errors.New("wasn't expecting a compressed key")
+	errMissingQuotes           = errors.New("first and last characters should be quotes")
+	errMissingKeyPrefix        = fmt.Errorf("private key missing %s prefix", PrivateKeyPrefix)
+	errInvalidPrivateKeyLength = fmt.Errorf("private key has unexpected length, expected %d", SECP256K1RSKLen)
+
+	_ RecoverableFactory = &FactorySECP256K1R{}
+	_ PublicKey          = &PublicKeySECP256K1R{}
+	_ PrivateKey         = &PrivateKeySECP256K1R{}
+)
 
 type FactorySECP256K1R struct{ Cache cache.LRU }
 
-// NewPrivateKey implements the Factory interface
 func (*FactorySECP256K1R) NewPrivateKey() (PrivateKey, error) {
 	k, err := secp256k1.GeneratePrivateKey()
 	return &PrivateKeySECP256K1R{sk: k}, err
 }
 
-// ToPublicKey implements the Factory interface
 func (*FactorySECP256K1R) ToPublicKey(b []byte) (PublicKey, error) {
 	key, err := secp256k1.ParsePubKey(b)
 	return &PublicKeySECP256K1R{
@@ -61,20 +74,20 @@ func (*FactorySECP256K1R) ToPublicKey(b []byte) (PublicKey, error) {
 	}, err
 }
 
-// ToPrivateKey implements the Factory interface
 func (*FactorySECP256K1R) ToPrivateKey(b []byte) (PrivateKey, error) {
+	if len(b) != SECP256K1RSKLen {
+		return nil, errInvalidPrivateKeyLength
+	}
 	return &PrivateKeySECP256K1R{
 		sk:    secp256k1.PrivKeyFromBytes(b),
 		bytes: b,
 	}, nil
 }
 
-// RecoverPublicKey returns the public key from a 65 byte signature
 func (f *FactorySECP256K1R) RecoverPublicKey(msg, sig []byte) (PublicKey, error) {
 	return f.RecoverHashPublicKey(hashing.ComputeHash256(msg), sig)
 }
 
-// RecoverHashPublicKey returns the public key from a 65 byte signature
 func (f *FactorySECP256K1R) RecoverHashPublicKey(hash, sig []byte) (PublicKey, error) {
 	cacheBytes := make([]byte, len(hash)+len(sig))
 	copy(cacheBytes, hash)
@@ -113,12 +126,10 @@ type PublicKeySECP256K1R struct {
 	bytes []byte
 }
 
-// Verify implements the PublicKey interface
 func (k *PublicKeySECP256K1R) Verify(msg, sig []byte) bool {
 	return k.VerifyHash(hashing.ComputeHash256(msg), sig)
 }
 
-// VerifyHash implements the PublicKey interface
 func (k *PublicKeySECP256K1R) VerifyHash(hash, sig []byte) bool {
 	factory := FactorySECP256K1R{}
 	pk, err := factory.RecoverHashPublicKey(hash, sig)
@@ -133,7 +144,6 @@ func (k *PublicKeySECP256K1R) ToECDSA() *stdecdsa.PublicKey {
 	return k.pk.ToECDSA()
 }
 
-// Address implements the PublicKey interface
 func (k *PublicKeySECP256K1R) Address() ids.ShortID {
 	if k.addr == ids.ShortEmpty {
 		addr, err := ids.ToShortID(hashing.PubkeyBytesToAddress(k.Bytes()))
@@ -145,7 +155,6 @@ func (k *PublicKeySECP256K1R) Address() ids.ShortID {
 	return k.addr
 }
 
-// Bytes implements the PublicKey interface
 func (k *PublicKeySECP256K1R) Bytes() []byte {
 	if k.bytes == nil {
 		k.bytes = k.pk.SerializeCompressed()
@@ -159,7 +168,6 @@ type PrivateKeySECP256K1R struct {
 	bytes []byte
 }
 
-// PublicKey implements the PrivateKey interface
 func (k *PrivateKeySECP256K1R) PublicKey() PublicKey {
 	if k.pk == nil {
 		k.pk = &PublicKeySECP256K1R{pk: k.sk.PubKey()}
@@ -167,12 +175,10 @@ func (k *PrivateKeySECP256K1R) PublicKey() PublicKey {
 	return k.pk
 }
 
-// Sign implements the PrivateKey interface
 func (k *PrivateKeySECP256K1R) Sign(msg []byte) ([]byte, error) {
 	return k.SignHash(hashing.ComputeHash256(msg))
 }
 
-// SignHash implements the PrivateKey interface
 func (k *PrivateKeySECP256K1R) SignHash(hash []byte) ([]byte, error) {
 	sig := ecdsa.SignCompact(k.sk, hash, false) // returns [v || r || s]
 	return rawSigToSig(sig)
@@ -183,12 +189,64 @@ func (k *PrivateKeySECP256K1R) ToECDSA() *stdecdsa.PrivateKey {
 	return k.sk.ToECDSA()
 }
 
-// Bytes implements the PrivateKey interface
 func (k *PrivateKeySECP256K1R) Bytes() []byte {
 	if k.bytes == nil {
 		k.bytes = k.sk.Serialize()
 	}
 	return k.bytes
+}
+
+func (k *PrivateKeySECP256K1R) String() string {
+	// We assume that the maximum size of a byte slice that
+	// can be stringified is at least the length of a SECP256K1 private key
+	keyStr, _ := cb58.Encode(k.Bytes())
+	return PrivateKeyPrefix + keyStr
+}
+
+func (k *PrivateKeySECP256K1R) MarshalJSON() ([]byte, error) {
+	return []byte("\"" + k.String() + "\""), nil
+}
+
+func (k *PrivateKeySECP256K1R) MarshalText() ([]byte, error) {
+	return []byte(k.String()), nil
+}
+
+func (k *PrivateKeySECP256K1R) UnmarshalJSON(b []byte) error {
+	str := string(b)
+	if str == nullStr { // If "null", do nothing
+		return nil
+	} else if len(str) < 2 {
+		return errMissingQuotes
+	}
+
+	lastIndex := len(str) - 1
+	if str[0] != '"' || str[lastIndex] != '"' {
+		return errMissingQuotes
+	}
+
+	strNoQuotes := str[1:lastIndex]
+	if !strings.HasPrefix(strNoQuotes, PrivateKeyPrefix) {
+		return errMissingKeyPrefix
+	}
+
+	strNoPrefix := strNoQuotes[len(PrivateKeyPrefix):]
+	keyBytes, err := cb58.Decode(strNoPrefix)
+	if err != nil {
+		return err
+	}
+	if len(keyBytes) != SECP256K1RSKLen {
+		return errInvalidPrivateKeyLength
+	}
+
+	*k = PrivateKeySECP256K1R{
+		sk:    secp256k1.PrivKeyFromBytes(keyBytes),
+		bytes: keyBytes,
+	}
+	return nil
+}
+
+func (k *PrivateKeySECP256K1R) UnmarshalText(text []byte) error {
+	return k.UnmarshalJSON(text)
 }
 
 // raw sig has format [v || r || s] whereas the sig has format [r || s || v]

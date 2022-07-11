@@ -17,6 +17,7 @@ linters:
     - asciicheck
     - bodyclose
     - deadcode
+    - depguard
     - errcheck
     - exportloopref
     - goconst
@@ -58,3 +59,12 @@ linters-settings:
       - "all"
       - "-SA6002" # argument should be pointer-like to avoid allocation, for sync.Pool
       - "-SA1019" # deprecated packages e.g., golang.org/x/crypto/ripemd160
+  # https://golangci-lint.run/usage/linters#gosec
+  gosec:
+    excludes:
+      - G107 # https://securego.io/docs/rules/g107.html
+  depguard:
+    list-type: blacklist
+    packages-with-error-message:
+      - io/ioutil: 'io/ioutil is deprecated. Use package io or os instead.'
+    include-go-root: true

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/ava-labs/avalanchego/ids"
-	"github.com/ava-labs/avalanchego/utils/constants"
 )
 
 var (
@@ -25,7 +24,7 @@ type InboundMessage interface {
 	BytesSavedCompression() int
 	Op() Op
 	Get(Field) interface{}
-	NodeID() ids.ShortID
+	NodeID() ids.NodeID
 	ExpirationTime() time.Time
 	OnFinishedHandling()
 }
@@ -34,7 +33,7 @@ type inboundMessage struct {
 	op                    Op
 	bytesSavedCompression int
 	fields                map[Field]interface{}
-	nodeID                ids.ShortID
+	nodeID                ids.NodeID
 	expirationTime        time.Time
 	onFinishedHandling    func()
 }
@@ -52,7 +51,7 @@ func (inMsg *inboundMessage) BytesSavedCompression() int { return inMsg.bytesSav
 func (inMsg *inboundMessage) Get(field Field) interface{} { return inMsg.fields[field] }
 
 // NodeID returns the node that the msg was sent by.
-func (inMsg *inboundMessage) NodeID() ids.ShortID { return inMsg.nodeID }
+func (inMsg *inboundMessage) NodeID() ids.NodeID { return inMsg.nodeID }
 
 // ExpirationTime returns the time this message doesn't need to be responded to.
 // A zero time means message does not expire.
@@ -68,7 +67,7 @@ func (inMsg *inboundMessage) OnFinishedHandling() {
 
 func (inMsg *inboundMessage) String() string {
 	sb := strings.Builder{}
-	sb.WriteString(fmt.Sprintf("(Op: %s, NodeID: %s%s", inMsg.op, constants.NodeIDPrefix, inMsg.nodeID))
+	sb.WriteString(fmt.Sprintf("(Op: %s, NodeID: %s", inMsg.op, inMsg.nodeID))
 	if requestIDIntf, exists := inMsg.fields[RequestID]; exists {
 		sb.WriteString(fmt.Sprintf(", RequestID: %d", requestIDIntf.(uint32)))
 	}
@@ -85,7 +84,7 @@ func (inMsg *inboundMessage) String() string {
 	case Notify:
 		sb.WriteString(fmt.Sprintf(", Notification: %d)", inMsg.fields[VMMessage].(uint32)))
 	case AppRequest, AppResponse, AppGossip:
-		sb.WriteString(fmt.Sprintf(", len(AppMsg): %d)", inMsg.fields[AppBytes].([]byte)))
+		sb.WriteString(fmt.Sprintf(", len(AppMsg): %d)", len(inMsg.fields[AppBytes].([]byte))))
 	default:
 		sb.WriteString(")")
 	}
@@ -93,11 +92,13 @@ func (inMsg *inboundMessage) String() string {
 	return sb.String()
 }
 
-// OutboundMessage represents a set of fields for an outbound message that can be serialized into a byte stream
+// OutboundMessage represents a set of fields for an outbound message that can
+// be serialized into a byte stream
 type OutboundMessage interface {
 	BytesSavedCompression() int
 	Bytes() []byte
 	Op() Op
+	BypassThrottling() bool
 
 	AddRef()
 	DecRef()
@@ -107,6 +108,7 @@ type outboundMessage struct {
 	bytes                 []byte
 	bytesSavedCompression int
 	op                    Op
+	bypassThrottling      bool
 
 	refLock sync.Mutex
 	refs    int
@@ -143,3 +145,28 @@ func (outMsg *outboundMessage) DecRef() {
 		outMsg.c.byteSlicePool.Put(outMsg.bytes)
 	}
 }
+
+// BypassThrottling when attempting to send this message
+func (outMsg *outboundMessage) BypassThrottling() bool { return outMsg.bypassThrottling }
+
+type TestMsg struct {
+	op               Op
+	bytes            []byte
+	bypassThrottling bool
+}
+
+func NewTestMsg(op Op, bytes []byte, bypassThrottling bool) *TestMsg {
+	return &TestMsg{
+		op:               op,
+		bytes:            bytes,
+		bypassThrottling: bypassThrottling,
+	}
+}
+
+func (m *TestMsg) Op() Op                   { return m.op }
+func (*TestMsg) Get(Field) interface{}      { return nil }
+func (m *TestMsg) Bytes() []byte            { return m.bytes }
+func (*TestMsg) BytesSavedCompression() int { return 0 }
+func (*TestMsg) AddRef()                    {}
+func (*TestMsg) DecRef()                    {}
+func (m *TestMsg) BypassThrottling() bool   { return m.bypassThrottling }

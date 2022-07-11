@@ -13,9 +13,12 @@ import (
 	"github.com/ava-labs/avalanchego/chains"
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/network"
+	"github.com/ava-labs/avalanchego/network/peer"
 	"github.com/ava-labs/avalanchego/snow/engine/common"
+	"github.com/ava-labs/avalanchego/snow/networking/benchlist"
 	"github.com/ava-labs/avalanchego/snow/validators"
 	"github.com/ava-labs/avalanchego/utils/constants"
+	"github.com/ava-labs/avalanchego/utils/ips"
 	"github.com/ava-labs/avalanchego/utils/json"
 	"github.com/ava-labs/avalanchego/utils/logging"
 	"github.com/ava-labs/avalanchego/version"
@@ -30,22 +33,24 @@ var (
 // Info is the API service for unprivileged info on a node
 type Info struct {
 	Parameters
-	log           logging.Logger
-	networking    network.Network
-	chainManager  chains.Manager
-	vmManager     vms.Manager
-	versionParser version.ApplicationParser
-	validators    validators.Set
+	log          logging.Logger
+	myIP         ips.DynamicIPPort
+	networking   network.Network
+	chainManager chains.Manager
+	vmManager    vms.Manager
+	validators   validators.Set
+	benchlist    benchlist.Manager
 }
 
 type Parameters struct {
-	Version               version.Application
-	NodeID                ids.ShortID
+	Version               *version.Application
+	NodeID                ids.NodeID
 	NetworkID             uint32
 	TxFee                 uint64
 	CreateAssetTxFee      uint64
 	CreateSubnetTxFee     uint64
 	CreateBlockchainTxFee uint64
+	VMManager             vms.Manager
 }
 
 // NewService returns a new admin API service
@@ -54,22 +59,24 @@ func NewService(
 	log logging.Logger,
 	chainManager chains.Manager,
 	vmManager vms.Manager,
+	myIP ips.DynamicIPPort,
 	network network.Network,
-	versionParser version.ApplicationParser,
 	validators validators.Set,
+	benchlist benchlist.Manager,
 ) (*common.HTTPHandler, error) {
 	newServer := rpc.NewServer()
 	codec := json.NewCodec()
 	newServer.RegisterCodec(codec, "application/json")
 	newServer.RegisterCodec(codec, "application/json;charset=UTF-8")
 	if err := newServer.RegisterService(&Info{
-		Parameters:    parameters,
-		log:           log,
-		chainManager:  chainManager,
-		vmManager:     vmManager,
-		networking:    network,
-		versionParser: versionParser,
-		validators:    validators,
+		Parameters:   parameters,
+		log:          log,
+		chainManager: chainManager,
+		vmManager:    vmManager,
+		myIP:         myIP,
+		networking:   network,
+		validators:   validators,
+		benchlist:    benchlist,
 	}, "info"); err != nil {
 		return nil, err
 	}
@@ -102,14 +109,14 @@ func (service *Info) GetNodeVersion(_ *http.Request, _ *struct{}, reply *GetNode
 
 // GetNodeIDReply are the results from calling GetNodeID
 type GetNodeIDReply struct {
-	NodeID string `json:"nodeID"`
+	NodeID ids.NodeID `json:"nodeID"`
 }
 
 // GetNodeID returns the node ID of this node
 func (service *Info) GetNodeID(_ *http.Request, _ *struct{}, reply *GetNodeIDReply) error {
 	service.log.Debug("Info: GetNodeID called")
 
-	reply.NodeID = service.NodeID.PrefixedString(constants.NodeIDPrefix)
+	reply.NodeID = service.NodeID
 	return nil
 }
 
@@ -127,7 +134,7 @@ type GetNodeIPReply struct {
 func (service *Info) GetNodeIP(_ *http.Request, _ *struct{}, reply *GetNodeIPReply) error {
 	service.log.Debug("Info: GetNodeIP called")
 
-	reply.IP = service.networking.IP().String()
+	reply.IP = service.myIP.IPPort().String()
 	return nil
 }
 
@@ -173,7 +180,13 @@ func (service *Info) GetBlockchainID(_ *http.Request, args *GetBlockchainIDArgs,
 
 // PeersArgs are the arguments for calling Peers
 type PeersArgs struct {
-	NodeIDs []string `json:"nodeIDs"`
+	NodeIDs []ids.NodeID `json:"nodeIDs"`
+}
+
+type Peer struct {
+	peer.Info
+
+	Benched []ids.ID `json:"benched"`
 }
 
 // PeersReply are the results from calling Peers
@@ -181,22 +194,23 @@ type PeersReply struct {
 	// Number of elements in [Peers]
 	NumPeers json.Uint64 `json:"numPeers"`
 	// Each element is a peer
-	Peers []network.PeerInfo `json:"peers"`
+	Peers []Peer `json:"peers"`
 }
 
 // Peers returns the list of current validators
 func (service *Info) Peers(_ *http.Request, args *PeersArgs, reply *PeersReply) error {
 	service.log.Debug("Info: Peers called")
-	nodeIDs := make([]ids.ShortID, 0, len(args.NodeIDs))
-	for _, nodeID := range args.NodeIDs {
-		nID, err := ids.ShortFromPrefixedString(nodeID, constants.NodeIDPrefix)
-		if err != nil {
-			return err
+
+	peers := service.networking.PeerInfo(args.NodeIDs)
+	peerInfo := make([]Peer, len(peers))
+	for i, peer := range peers {
+		peerInfo[i] = Peer{
+			Info:    peer,
+			Benched: service.benchlist.GetBenched(peer.ID),
 		}
-		nodeIDs = append(nodeIDs, nID)
 	}
 
-	reply.Peers = service.networking.Peers(nodeIDs)
+	reply.Peers = peerInfo
 	reply.NumPeers = json.Uint64(len(reply.Peers))
 	return nil
 }
@@ -275,4 +289,23 @@ func (service *Info) GetTxFee(_ *http.Request, args *struct{}, reply *GetTxFeeRe
 	reply.CreateSubnetTxFee = json.Uint64(service.CreateSubnetTxFee)
 	reply.CreateBlockchainTxFee = json.Uint64(service.CreateBlockchainTxFee)
 	return nil
+}
+
+// GetVMsReply contains the response metadata for GetVMs
+type GetVMsReply struct {
+	VMs map[ids.ID][]string `json:"vms"`
+}
+
+// GetVMs lists the virtual machines installed on the node
+func (service *Info) GetVMs(_ *http.Request, _ *struct{}, reply *GetVMsReply) error {
+	service.log.Debug("Info: GetVMs called")
+
+	// Fetch the VMs registered on this node.
+	vmIDs, err := service.VMManager.ListFactories()
+	if err != nil {
+		return err
+	}
+
+	reply.VMs, err = ids.GetRelevantAliases(service.VMManager, vmIDs)
+	return err
 }

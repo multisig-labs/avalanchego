@@ -6,15 +6,7 @@ package logging
 import "testing"
 
 func TestLog(t *testing.T) {
-	config, err := DefaultConfig()
-	if err != nil {
-		t.Fatalf("Error: %s", err)
-	}
-
-	log, err := NewTestLog(config)
-	if err != nil {
-		t.Fatalf("Error creating log: %s", err)
-	}
+	log := NewLogger(false, "", NewWrappedCore(Info, Discard, Plain.ConsoleEncoder()))
 
 	recovered := new(bool)
 	panicFunc := func() {

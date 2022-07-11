@@ -21,14 +21,14 @@ import (
 
 // IPCServer maintains the IPCs
 type IPCServer struct {
-	httpServer   *server.Server
+	httpServer   server.Server
 	chainManager chains.Manager
 	log          logging.Logger
 	ipcs         *ipcs.ChainIPCs
 }
 
 // NewService returns a new IPCs API service
-func NewService(log logging.Logger, chainManager chains.Manager, httpServer *server.Server, ipcs *ipcs.ChainIPCs) (*common.HTTPHandler, error) {
+func NewService(log logging.Logger, chainManager chains.Manager, httpServer server.Server, ipcs *ipcs.ChainIPCs) (*common.HTTPHandler, error) {
 	ipcServer := &IPCServer{
 		log:          log,
 		chainManager: chainManager,
@@ -84,7 +84,7 @@ type UnpublishBlockchainArgs struct {
 }
 
 // UnpublishBlockchain closes publishing of a blockchainID
-func (ipc *IPCServer) UnpublishBlockchain(r *http.Request, args *UnpublishBlockchainArgs, reply *api.SuccessResponse) error {
+func (ipc *IPCServer) UnpublishBlockchain(r *http.Request, args *UnpublishBlockchainArgs, _ *api.EmptyReply) error {
 	ipc.log.Debug("IPCs: UnpublishBlockchain called with BlockchainID: %s", args.BlockchainID)
 
 	chainID, err := ipc.chainManager.Lookup(args.BlockchainID)
@@ -98,7 +98,6 @@ func (ipc *IPCServer) UnpublishBlockchain(r *http.Request, args *UnpublishBlockc
 		return fmt.Errorf("blockchainID not publishing: %s", chainID)
 	}
 
-	reply.Success = true
 	return err
 }
 

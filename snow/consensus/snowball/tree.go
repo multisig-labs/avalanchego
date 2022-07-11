@@ -11,14 +11,15 @@ import (
 )
 
 var (
-	_ node = &unaryNode{}
-	_ node = &binaryNode{}
+	_ Factory   = &TreeFactory{}
+	_ Consensus = &Tree{}
+	_ node      = &unaryNode{}
+	_ node      = &binaryNode{}
 )
 
 // TreeFactory implements Factory by returning a tree struct
 type TreeFactory struct{}
 
-// New implements Factory
 func (TreeFactory) New() Consensus { return &Tree{} }
 
 // Tree implements the snowball interface by using a modified patricia tree.
@@ -42,7 +43,6 @@ type Tree struct {
 	shouldReset bool
 }
 
-// Initialize implements the Consensus interface
 func (t *Tree) Initialize(params Parameters, choice ids.ID) {
 	t.params = params
 
@@ -57,10 +57,8 @@ func (t *Tree) Initialize(params Parameters, choice ids.ID) {
 	}
 }
 
-// Parameters implements the Consensus interface
 func (t *Tree) Parameters() Parameters { return t.params }
 
-// Add implements the Consensus interface
 func (t *Tree) Add(choice ids.ID) {
 	prefix := t.node.DecidedPrefix()
 	// Make sure that we haven't already decided against this new id
@@ -69,7 +67,6 @@ func (t *Tree) Add(choice ids.ID) {
 	}
 }
 
-// RecordPoll implements the Consensus interface
 func (t *Tree) RecordPoll(votes ids.Bag) {
 	// Get the assumed decided prefix of the root node.
 	decidedPrefix := t.node.DecidedPrefix()
@@ -87,7 +84,6 @@ func (t *Tree) RecordPoll(votes ids.Bag) {
 	t.shouldReset = false
 }
 
-// RecordUnsuccessfulPoll implements the Consensus interface
 func (t *Tree) RecordUnsuccessfulPoll() { t.shouldReset = true }
 
 func (t *Tree) String() string {
@@ -416,11 +412,13 @@ func (u *unaryNode) RecordPoll(votes ids.Bag, reset bool) node {
 			// u.commonPrefix and u.child.DecidedPrefix() would always result in
 			// the same set being returned.
 
-			// If I'm now decided, return my child
+			newChild := u.child.RecordPoll(votes, u.shouldReset)
 			if u.Finalized() {
-				return u.child.RecordPoll(votes, u.shouldReset)
+				// If I'm now decided, return my child
+				return newChild
 			}
-			u.child = u.child.RecordPoll(votes, u.shouldReset)
+			u.child = newChild
+
 			// The child's preference may have changed
 			u.preference = u.child.Preference()
 		}
@@ -523,12 +521,12 @@ func (b *binaryNode) RecordPoll(votes ids.Bag, reset bool) node {
 			filteredVotes := prunedVotes.Filter(
 				b.bit+1, child.DecidedPrefix(), b.preferences[bit])
 
+			newChild := child.RecordPoll(filteredVotes, b.shouldReset[bit])
 			if b.snowball.Finalized() {
 				// If we are decided here, that means we must have decided due
 				// to this poll. Therefore, we must have decided on bit.
-				return child.RecordPoll(filteredVotes, b.shouldReset[bit])
+				return newChild
 			}
-			newChild := child.RecordPoll(filteredVotes, b.shouldReset[bit])
 			b.children[bit] = newChild
 			b.preferences[bit] = newChild.Preference()
 		}
