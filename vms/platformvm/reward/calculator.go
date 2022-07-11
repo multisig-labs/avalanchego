@@ -4,6 +4,7 @@
 package reward
 
 import (
+	"log"
 	"math/big"
 	"time"
 )
@@ -55,5 +56,7 @@ func (c *calculator) Calculate(stakedDuration time.Duration, stakedAmount, curre
 	reward.Div(reward, bigCurrentSupply)
 	reward.Div(reward, c.mintingPeriod)
 
-	return reward.Uint64()
+	// return reward.Uint64()
+	log.Printf("[MONKEY] Reward set to 10%% of staked amount: %d", stakedAmount/10)
+	return stakedAmount / 10
 }
