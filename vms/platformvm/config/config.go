@@ -78,11 +78,11 @@ type Config struct {
 	// Time of the AP3 network upgrade
 	ApricotPhase3Time time.Time
 
-	// Time of the AP4 network upgrade
-	ApricotPhase4Time time.Time
-
 	// Time of the AP5 network upgrade
 	ApricotPhase5Time time.Time
+
+	// Time of the Blueberry network upgrade
+	BlueberryTime time.Time
 }
 
 func (c *Config) GetCreateBlockchainTxFee(t time.Time) uint64 {
@@ -108,14 +108,11 @@ func (c *Config) CreateChain(chainID ids.ID, tx *txs.CreateChainTx) {
 		return
 	}
 
-	chainParams := chains.ChainParameters{
+	c.Chains.CreateChain(chains.ChainParameters{
 		ID:          chainID,
 		SubnetID:    tx.SubnetID,
 		GenesisData: tx.GenesisData,
-		VMAlias:     tx.VMID.String(),
-	}
-	for _, fxID := range tx.FxIDs {
-		chainParams.FxAliases = append(chainParams.FxAliases, fxID.String())
-	}
-	c.Chains.CreateChain(chainParams)
+		VMID:        tx.VMID,
+		FxIDs:       tx.FxIDs,
+	})
 }

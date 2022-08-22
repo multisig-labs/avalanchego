@@ -1,5 +1,124 @@
 # Release Notes
 
+## [v1.7.18](https://github.com/ava-labs/avalanchego/releases/tag/v1.7.18)
+
+This version is backwards compatible to [v1.7.0](https://github.com/ava-labs/avalanchego/releases/tag/v1.7.0). It is optional, but encouraged. The supported plugin version is `15`.
+
+### Fixes
+
+- Fixed bug in `codeToFetch` database accessors that caused an error when starting/stopping state sync
+- Fixed rare BAD BLOCK errors during C-chain bootstrapping
+- Fixed platformvm `couldn't get preferred block state` log due to attempted block building during bootstrapping
+- Fixed platformvm `failed to fetch next staker to reward` error log due to an incorrect `lastAcceptedID` reference
+- Fixed AWS AMI creation
+
+### PlatformVM
+
+- Refactored platformvm metrics handling
+- Refactored platformvm block creation
+- Introduced support to prevent empty nodeID use on the P-chain to be activated in a future upgrade
+
+### Coreth
+
+- Updated gas price estimation to limit lookback window based on block timestamps
+- Added metrics for processed/accepted gas
+- Simplified syntactic block verification
+- Ensured statedb errors during block processing are logged
+- Removed deprecated gossiper/block building logic from pre-Apricot Phase 4
+- Added marshal function for duration to improve config output
+
+### Miscellaneous
+
+- Updated local network genesis to use a newer start time
+- Updated minimum golang version to go1.18.1
+- Removed support for RocksDB
+- Bumped go-ethereum version to v1.10.21
+- Added various additional tests
+- Introduced additional database invariants for all database implementations
+- Added retries to windows CI installations
+- Removed useless ID aliasing during chain creation
+
+## [v1.7.17](https://github.com/ava-labs/avalanchego/releases/tag/v1.7.17)
+
+This version is backwards compatible to [v1.7.0](https://github.com/ava-labs/avalanchego/releases/tag/v1.7.0). It is optional, but encouraged. The supported plugin version is `15`.
+
+### VMs
+
+- Refactored P-chain block state management
+  - Supporting easier parsing and usage of blocks
+  - Improving separation of block execution with block definition
+  - Unifying state definitions
+- Introduced support to send custom X-chain assets to the P-chain to be activated in a future upgrade
+- Introduced support to use custom assets on the P-chain to be activated in a future upgrade
+- Added VMs README to begin fully documenting plugin invariants
+- Added various comments around expected usages of VM tools
+
+### Coreth
+
+- Added optional JSON logging
+- Added interface for supporting stateful precompiles
+- Removed legacy code format from the database
+
+### Fixes
+
+- Fixed ungraceful gRPC connection closure during very long running requests
+- Fixed LevelDB panic during shutdown
+- Fixed verification of `--stake-max-consumption-rate` to include the upper-bound
+- Fixed various CI failures
+- Fixed flaky unit tests
+
+### Miscellaneous
+
+- Added bootstrapping ETA metrics
+- Converted all logs to support structured fields
+- Improved Snowman++ oracle block verification error messages
+- Removed deprecated or unused scripts
+
+## [v1.7.16](https://github.com/ava-labs/avalanchego/releases/tag/v1.7.16)
+
+This version is backwards compatible to [v1.7.0](https://github.com/ava-labs/avalanchego/releases/tag/v1.7.0). It is optional, but encouraged. The supported plugin version is `15`.
+
+### LevelDB
+
+- Fix rapid disk growth by manually specifying the maximum manifest file size
+
+## [v1.7.15](https://github.com/ava-labs/avalanchego/releases/tag/v1.7.15)
+
+This version is backwards compatible to [v1.7.0](https://github.com/ava-labs/avalanchego/releases/tag/v1.7.0). It is optional, but encouraged. The supported plugin version is `15`.
+
+### PlatformVM
+
+- Replaced copy-on-write validator set data-structure to use tree diffs to optimize validator set additions
+- Replaced validation transactions with a standardized representation to remove transaction type handling
+- Migrated transaction execution to its own package
+- Removed child pointers from processing blocks
+- Added P-chain wallet helper for providing initial transactions
+
+### Coreth
+
+- Bumped go-ethereum dependency to v1.10.20
+- Updated API names used to enable services in `eth-api` config flag. Prior names are supported but deprecated, please update configurations [accordingly](https://docs.avax.network/nodes/maintain/chain-config-flags#c-chain-configs)
+- Optimized state sync by parallelizing trie syncing
+- Added `eth_syncing` API for compatibility. Note: This API is only accessible after bootstrapping and always returns `"false"`, since the node will no longer be syncing at that point
+- Added metrics to the atomic transaction mempool
+- Added metrics for incoming/outgoing mempool gossip
+
+### Fixes
+
+- Updated Snowman and Avalanche consensus engines to report original container preferences before processing the provided container
+- Fixed inbound message byte throttler context cancellation cleanup
+- Removed case sensitivity of IP resolver services
+- Added failing health check when a whitelisted subnet fails to initialize a chain
+
+### Miscellaneous
+
+- Added gRPC client metrics for dynamically created connections
+- Added uninitialized continuous time averager for when initial predictions are unreliable
+- Updated linter version
+- Documented various platform invariants
+- Cleaned up various dead parameters
+- Improved various tests
+
 ## [v1.7.14](https://github.com/ava-labs/avalanchego/releases/tag/v1.7.14)
 
 This version is backwards compatible to [v1.7.0](https://github.com/ava-labs/avalanchego/releases/tag/v1.7.0). It is optional, but encouraged.

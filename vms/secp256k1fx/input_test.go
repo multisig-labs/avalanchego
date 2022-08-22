@@ -5,11 +5,12 @@ package secp256k1fx
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestInputVerifyNil(t *testing.T) {
+	require := require.New(t)
 	in := (*Input)(nil)
-	if err := in.Verify(); err == nil {
-		t.Fatalf("Input.Verify should have returned an error due to an nil input")
-	}
+	require.ErrorIs(in.Verify(), errNilInput)
 }

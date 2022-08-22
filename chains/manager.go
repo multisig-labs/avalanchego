@@ -13,6 +13,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"go.uber.org/zap"
+
 	"github.com/ava-labs/avalanchego/api/health"
 	"github.com/ava-labs/avalanchego/api/keystore"
 	"github.com/ava-labs/avalanchego/api/metrics"
@@ -114,9 +116,9 @@ type ChainParameters struct {
 	// The genesis data of this chain's ledger.
 	GenesisData []byte
 	// The ID of the vm this chain is running.
-	VMAlias string
+	VMID ids.ID
 	// The IDs of the feature extensions this chain is running.
-	FxAliases []string
+	FxIDs []ids.ID
 	// Should only be set if the default beacons can't be used.
 	CustomBeacons validators.Set
 }
@@ -243,11 +245,9 @@ func (m *manager) CreateChain(chain ChainParameters) {
 // creating the P-chain.
 func (m *manager) ForceCreateChain(chainParams ChainParameters) {
 	if m.StakingEnabled && chainParams.SubnetID != constants.PrimaryNetworkID && !m.WhitelistedSubnets.Contains(chainParams.SubnetID) {
-		m.Log.Debug("Skipped creating non-whitelisted chain:\n"+
-			"    ID: %s\n"+
-			"    VMID:%s",
-			chainParams.ID,
-			chainParams.VMAlias,
+		m.Log.Debug("skipped creating non-whitelisted chain",
+			zap.Stringer("chainID", chainParams.ID),
+			zap.Stringer("vmID", chainParams.VMID),
 		)
 		return
 	}
@@ -255,15 +255,15 @@ func (m *manager) ForceCreateChain(chainParams ChainParameters) {
 	// (Recall that the string representation of a chain's ID is also an alias
 	//  for a chain)
 	if alias, isRepeat := m.isChainWithAlias(chainParams.ID.String()); isRepeat {
-		m.Log.Debug("there is already a chain with alias '%s'. Chain not created.",
-			alias)
+		m.Log.Debug("skipping chain creation",
+			zap.String("reason", "there is already a chain with same alias"),
+			zap.String("alias", alias),
+		)
 		return
 	}
-	m.Log.Info("creating chain:\n"+
-		"    ID: %s\n"+
-		"    VMID:%s",
-		chainParams.ID,
-		chainParams.VMAlias,
+	m.Log.Info("creating chain",
+		zap.Stringer("chainID", chainParams.ID),
+		zap.Stringer("vmID", chainParams.VMID),
 	)
 
 	sb, exists := m.subnets[chainParams.SubnetID]
@@ -284,11 +284,33 @@ func (m *manager) ForceCreateChain(chainParams ChainParameters) {
 		sb.removeChain(chainParams.ID)
 		if m.CriticalChains.Contains(chainParams.ID) {
 			// Shut down if we fail to create a required chain (i.e. X, P or C)
-			m.Log.Fatal("error creating required chain %s: %s", chainParams.ID, err)
+			m.Log.Fatal("error creating required chain",
+				zap.Stringer("chainID", chainParams.ID),
+				zap.Error(err),
+			)
 			go m.ShutdownNodeFunc(1)
 			return
 		}
-		m.Log.Error("error creating chain %s: %s", chainParams.ID, err)
+
+		chainAlias := m.PrimaryAliasOrDefault(chainParams.ID)
+		m.Log.Error("error creating chain",
+			zap.String("chainAlias", chainAlias),
+			zap.Error(err),
+		)
+
+		// Register the health check for this chain regardless of if it was
+		// created or not. This attempts to notify the node operator that their
+		// node may not be properly validating the subnet they expect to be
+		// validating.
+		healthCheckErr := fmt.Errorf("failed to create chain on whitelisted subnet: %s", chainParams.SubnetID)
+		if err := m.Health.RegisterHealthCheck(chainAlias, health.CheckerFunc(func() (interface{}, error) {
+			return nil, healthCheckErr
+		})); err != nil {
+			m.Log.Error("failed to register failing health check",
+				zap.String("chainAlias", chainAlias),
+				zap.Error(err),
+			)
+		}
 		return
 	}
 
@@ -326,12 +348,7 @@ func (m *manager) ForceCreateChain(chainParams ChainParameters) {
 
 // Create a chain
 func (m *manager) buildChain(chainParams ChainParameters, sb Subnet) (*chain, error) {
-	vmID, err := m.VMManager.Lookup(chainParams.VMAlias)
-	if err != nil {
-		return nil, fmt.Errorf("error while looking up VM: %w", err)
-	}
-
-	if chainParams.ID != constants.PlatformChainID && vmID == constants.PlatformVMID {
+	if chainParams.ID != constants.PlatformChainID && chainParams.VMID == constants.PlatformVMID {
 		return nil, errCreatePlatformVM
 	}
 	primaryAlias := m.PrimaryAliasOrDefault(chainParams.ID)
@@ -390,7 +407,7 @@ func (m *manager) buildChain(chainParams ChainParameters, sb Subnet) (*chain, er
 	}
 
 	// Get a factory for the vm we want to use on our chain
-	vmFactory, err := m.VMManager.GetFactory(vmID)
+	vmFactory, err := m.VMManager.GetFactory(chainParams.VMID)
 	if err != nil {
 		return nil, fmt.Errorf("error while getting vmFactory: %w", err)
 	}
@@ -402,13 +419,8 @@ func (m *manager) buildChain(chainParams ChainParameters, sb Subnet) (*chain, er
 	}
 	// TODO: Shutdown VM if an error occurs
 
-	fxs := make([]*common.Fx, len(chainParams.FxAliases))
-	for i, fxAlias := range chainParams.FxAliases {
-		fxID, err := m.VMManager.Lookup(fxAlias)
-		if err != nil {
-			return nil, fmt.Errorf("error while looking up Fx: %w", err)
-		}
-
+	fxs := make([]*common.Fx, len(chainParams.FxIDs))
+	for i, fxID := range chainParams.FxIDs {
 		// Get a factory for the fx we want to use on our chain
 		fxFactory, err := m.VMManager.GetFactory(fxID)
 		if err != nil {

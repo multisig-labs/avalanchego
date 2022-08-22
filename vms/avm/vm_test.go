@@ -8,12 +8,13 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	stdjson "encoding/json"
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/ava-labs/avalanchego/api/keystore"
 	"github.com/ava-labs/avalanchego/chains/atomic"
@@ -24,11 +25,11 @@ import (
 	"github.com/ava-labs/avalanchego/snow"
 	"github.com/ava-labs/avalanchego/snow/engine/common"
 	"github.com/ava-labs/avalanchego/utils/cb58"
+	"github.com/ava-labs/avalanchego/utils/constants"
 	"github.com/ava-labs/avalanchego/utils/crypto"
 	"github.com/ava-labs/avalanchego/utils/formatting"
 	"github.com/ava-labs/avalanchego/utils/formatting/address"
 	"github.com/ava-labs/avalanchego/utils/json"
-	"github.com/ava-labs/avalanchego/utils/logging"
 	"github.com/ava-labs/avalanchego/utils/wrappers"
 	"github.com/ava-labs/avalanchego/version"
 	"github.com/ava-labs/avalanchego/vms/avm/fxs"
@@ -42,11 +43,11 @@ import (
 )
 
 var (
-	networkID       uint32 = 10
-	chainID                = ids.ID{5, 4, 3, 2, 1}
-	platformChainID        = ids.Empty.Prefix(0)
-	testTxFee              = uint64(1000)
-	startBalance           = uint64(50000)
+	networkID         uint32 = 10
+	chainID                  = ids.ID{5, 4, 3, 2, 1}
+	testTxFee                = uint64(1000)
+	testBlueberryTime        = time.Date(10000, time.December, 1, 0, 0, 0, 0, time.UTC)
+	startBalance             = uint64(50000)
 
 	keys  []*crypto.PrivateKeySECP256K1R
 	addrs []ids.ShortID // addrs[i] corresponds to keys[i]
@@ -101,8 +102,8 @@ func NewContext(tb testing.TB) *snow.Context {
 	errs.Add(
 		aliaser.Alias(chainID, "X"),
 		aliaser.Alias(chainID, chainID.String()),
-		aliaser.Alias(platformChainID, "P"),
-		aliaser.Alias(platformChainID, platformChainID.String()),
+		aliaser.Alias(constants.PlatformChainID, "P"),
+		aliaser.Alias(constants.PlatformChainID, constants.PlatformChainID.String()),
 	)
 	if errs.Errored() {
 		tb.Fatal(errs.Err)
@@ -112,7 +113,7 @@ func NewContext(tb testing.TB) *snow.Context {
 		chainsToSubnet: make(map[ids.ID]ids.ID),
 	}
 	sn.chainsToSubnet[chainID] = ctx.SubnetID
-	sn.chainsToSubnet[platformChainID] = ctx.SubnetID
+	sn.chainsToSubnet[constants.PlatformChainID] = ctx.SubnetID
 	ctx.SNLookup = sn
 	return ctx
 }
@@ -228,6 +229,21 @@ func BuildGenesisTest(tb testing.TB) []byte {
 					},
 				},
 			},
+			"asset4": {
+				Name: "myFixedCapAsset",
+				InitialState: map[string][]interface{}{
+					"fixedCap": {
+						Holder{
+							Amount:  json.Uint64(startBalance),
+							Address: addr0Str,
+						},
+						Holder{
+							Amount:  json.Uint64(startBalance),
+							Address: addr1Str,
+						},
+					},
+				},
+			},
 		},
 	}
 
@@ -269,11 +285,7 @@ func GenesisVMWithArgs(tb testing.TB, additionalFxs []*common.Fx, args *BuildGen
 
 	baseDBManager := manager.NewMemDB(version.Semantic1_0_0)
 
-	m := &atomic.Memory{}
-	err := m.Initialize(logging.NoLog{}, prefixdb.New([]byte{0}, baseDBManager.Current().Database))
-	if err != nil {
-		tb.Fatal(err)
-	}
+	m := atomic.NewMemory(prefixdb.New([]byte{0}, baseDBManager.Current().Database))
 	ctx.SharedMemory = m.NewSharedMemory(ctx.ChainID)
 
 	// NB: this lock is intentionally left locked when this function returns.
@@ -293,6 +305,7 @@ func GenesisVMWithArgs(tb testing.TB, additionalFxs []*common.Fx, args *BuildGen
 	vm := &VM{Factory: Factory{
 		TxFee:            testTxFee,
 		CreateAssetTxFee: testTxFee,
+		BlueberryTime:    testBlueberryTime,
 	}}
 	configBytes, err := stdjson.Marshal(Config{IndexTransactions: true})
 	if err != nil {
@@ -948,8 +961,8 @@ func setupTxFeeAssets(t *testing.T) ([]byte, chan common.Message, *VM, *atomic.M
 	}
 	genesisBytes, issuer, vm, m := GenesisVMWithArgs(t, nil, customArgs)
 	expectedID, err := vm.Aliaser.Lookup(assetAlias)
-	assert.NoError(t, err)
-	assert.Equal(t, expectedID, vm.feeAssetID)
+	require.NoError(t, err)
+	require.Equal(t, expectedID, vm.feeAssetID)
 	return genesisBytes, issuer, vm, m
 }
 
@@ -958,23 +971,23 @@ func TestIssueTxWithFeeAsset(t *testing.T) {
 	ctx := vm.ctx
 	defer func() {
 		err := vm.Shutdown()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		ctx.Lock.Unlock()
 	}()
 	// send first asset
 	newTx := NewTxWithAsset(t, genesisBytes, vm, feeAssetName)
 
 	txID, err := vm.IssueTx(newTx.Bytes())
-	assert.NoError(t, err)
-	assert.Equal(t, txID, newTx.ID())
+	require.NoError(t, err)
+	require.Equal(t, txID, newTx.ID())
 
 	ctx.Lock.Unlock()
 
 	msg := <-issuer
-	assert.Equal(t, msg, common.PendingTxs)
+	require.Equal(t, msg, common.PendingTxs)
 
 	ctx.Lock.Lock()
-	assert.Len(t, vm.PendingTxs(), 1)
+	require.Len(t, vm.PendingTxs(), 1)
 	t.Log(vm.PendingTxs())
 }
 
@@ -983,7 +996,7 @@ func TestIssueTxWithAnotherAsset(t *testing.T) {
 	ctx := vm.ctx
 	defer func() {
 		err := vm.Shutdown()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		ctx.Lock.Unlock()
 	}()
 
@@ -1036,16 +1049,16 @@ func TestIssueTxWithAnotherAsset(t *testing.T) {
 	}
 
 	txID, err := vm.IssueTx(newTx.Bytes())
-	assert.NoError(t, err)
-	assert.Equal(t, txID, newTx.ID())
+	require.NoError(t, err)
+	require.Equal(t, txID, newTx.ID())
 
 	ctx.Lock.Unlock()
 
 	msg := <-issuer
-	assert.Equal(t, msg, common.PendingTxs)
+	require.Equal(t, msg, common.PendingTxs)
 
 	ctx.Lock.Lock()
-	assert.Len(t, vm.PendingTxs(), 1)
+	require.Len(t, vm.PendingTxs(), 1)
 }
 
 func TestVMFormat(t *testing.T) {
@@ -1090,7 +1103,7 @@ func TestTxCached(t *testing.T) {
 	txBytes := newTx.Bytes()
 
 	_, err := vm.ParseTx(txBytes)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	db := mockdb.New()
 	called := new(bool)
@@ -1102,14 +1115,14 @@ func TestTxCached(t *testing.T) {
 	registerer := prometheus.NewRegistry()
 
 	err = vm.metrics.Initialize("", registerer)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	vm.state, err = states.New(prefixdb.New([]byte("tx"), db), vm.parser, registerer)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	_, err = vm.ParseTx(txBytes)
-	assert.NoError(t, err)
-	assert.False(t, *called, "shouldn't have called the DB")
+	require.NoError(t, err)
+	require.False(t, *called, "shouldn't have called the DB")
 }
 
 func TestTxNotCached(t *testing.T) {
@@ -1126,7 +1139,7 @@ func TestTxNotCached(t *testing.T) {
 	txBytes := newTx.Bytes()
 
 	_, err := vm.ParseTx(txBytes)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	db := mockdb.New()
 	called := new(bool)
@@ -1137,19 +1150,19 @@ func TestTxNotCached(t *testing.T) {
 	db.OnPut = func([]byte, []byte) error { return nil }
 
 	registerer := prometheus.NewRegistry()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = vm.metrics.Initialize("", registerer)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	vm.state, err = states.New(db, vm.parser, registerer)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	vm.uniqueTxs.Flush()
 
 	_, err = vm.ParseTx(txBytes)
-	assert.NoError(t, err)
-	assert.True(t, *called, "should have called the DB")
+	require.NoError(t, err)
+	require.True(t, *called, "should have called the DB")
 }
 
 func TestTxVerifyAfterIssueTx(t *testing.T) {
@@ -1391,7 +1404,7 @@ func TestImportTxSerialization(t *testing.T) {
 	if err := vm.parser.InitializeTx(tx); err != nil {
 		t.Fatal(err)
 	}
-	assert.Equal(t, tx.ID().String(), "9wdPb5rsThXYLX4WxkNeyYrNMfDE5cuWLgifSjxKiA2dCmgCZ")
+	require.Equal(t, tx.ID().String(), "9wdPb5rsThXYLX4WxkNeyYrNMfDE5cuWLgifSjxKiA2dCmgCZ")
 	result := tx.Bytes()
 	if !bytes.Equal(expected, result) {
 		t.Fatalf("\nExpected: 0x%x\nResult:   0x%x", expected, result)
@@ -1449,7 +1462,7 @@ func TestImportTxSerialization(t *testing.T) {
 	if err := tx.SignSECP256K1Fx(vm.parser.Codec(), [][]*crypto.PrivateKeySECP256K1R{{keys[0], keys[0]}, {keys[0], keys[0]}}); err != nil {
 		t.Fatal(err)
 	}
-	assert.Equal(t, tx.ID().String(), "pCW7sVBytzdZ1WrqzGY1DvA2S9UaMr72xpUMxVyx1QHBARNYx")
+	require.Equal(t, tx.ID().String(), "pCW7sVBytzdZ1WrqzGY1DvA2S9UaMr72xpUMxVyx1QHBARNYx")
 	result = tx.Bytes()
 
 	// there are two credentials
@@ -1467,15 +1480,11 @@ func TestIssueImportTx(t *testing.T) {
 	issuer := make(chan common.Message, 1)
 	baseDBManager := manager.NewMemDB(version.Semantic1_0_0)
 
-	m := &atomic.Memory{}
-	err := m.Initialize(logging.NoLog{}, prefixdb.New([]byte{0}, baseDBManager.Current().Database))
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := atomic.NewMemory(prefixdb.New([]byte{0}, baseDBManager.Current().Database))
 
 	ctx := NewContext(t)
 	ctx.SharedMemory = m.NewSharedMemory(chainID)
-	peerSharedMemory := m.NewSharedMemory(platformChainID)
+	peerSharedMemory := m.NewSharedMemory(constants.PlatformChainID)
 
 	genesisTx := GetAVAXTxFromGenesisTest(genesisBytes, t)
 
@@ -1489,7 +1498,7 @@ func TestIssueImportTx(t *testing.T) {
 	}
 
 	avmConfigBytes, err := stdjson.Marshal(avmConfig)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	vm := &VM{}
 	err = vm.Initialize(
 		ctx,
@@ -1545,7 +1554,7 @@ func TestIssueImportTx(t *testing.T) {
 				},
 			}},
 		}},
-		SourceChain: platformChainID,
+		SourceChain: constants.PlatformChainID,
 		ImportedIns: []*avax.TransferableInput{{
 			UTXOID: utxoID,
 			Asset:  txAssetID,
@@ -1644,11 +1653,7 @@ func TestForceAcceptImportTx(t *testing.T) {
 	issuer := make(chan common.Message, 1)
 	baseDBManager := manager.NewMemDB(version.Semantic1_0_0)
 
-	m := &atomic.Memory{}
-	err := m.Initialize(logging.NoLog{}, prefixdb.New([]byte{0}, baseDBManager.Current().Database))
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := atomic.NewMemory(prefixdb.New([]byte{0}, baseDBManager.Current().Database))
 
 	ctx := NewContext(t)
 	ctx.SharedMemory = m.NewSharedMemory(chainID)
@@ -1663,7 +1668,7 @@ func TestForceAcceptImportTx(t *testing.T) {
 		}
 		ctx.Lock.Unlock()
 	}()
-	err = vm.Initialize(
+	err := vm.Initialize(
 		ctx,
 		baseDBManager.NewPrefixDBManager([]byte{1}),
 		genesisBytes,
@@ -1708,7 +1713,7 @@ func TestForceAcceptImportTx(t *testing.T) {
 			NetworkID:    networkID,
 			BlockchainID: chainID,
 		}},
-		SourceChain: platformChainID,
+		SourceChain: constants.PlatformChainID,
 		ImportedIns: []*avax.TransferableInput{{
 			UTXOID: utxoID,
 			Asset:  avax.Asset{ID: genesisTx.ID()},
@@ -1756,11 +1761,7 @@ func TestIssueExportTx(t *testing.T) {
 	issuer := make(chan common.Message, 1)
 	baseDBManager := manager.NewMemDB(version.Semantic1_0_0)
 
-	m := &atomic.Memory{}
-	err := m.Initialize(logging.NoLog{}, prefixdb.New([]byte{0}, baseDBManager.Current().Database))
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := atomic.NewMemory(prefixdb.New([]byte{0}, baseDBManager.Current().Database))
 
 	ctx := NewContext(t)
 	ctx.SharedMemory = m.NewSharedMemory(chainID)
@@ -1813,7 +1814,7 @@ func TestIssueExportTx(t *testing.T) {
 				},
 			}},
 		}},
-		DestinationChain: platformChainID,
+		DestinationChain: constants.PlatformChainID,
 		ExportedOuts: []*avax.TransferableOutput{{
 			Asset: avax.Asset{ID: avaxID},
 			Out: &secp256k1fx.TransferOutput{
@@ -1860,7 +1861,7 @@ func TestIssueExportTx(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	peerSharedMemory := m.NewSharedMemory(platformChainID)
+	peerSharedMemory := m.NewSharedMemory(constants.PlatformChainID)
 	utxoBytes, _, _, err := peerSharedMemory.Indexed(
 		vm.ctx.ChainID,
 		[][]byte{
@@ -1884,11 +1885,7 @@ func TestClearForceAcceptedExportTx(t *testing.T) {
 	issuer := make(chan common.Message, 1)
 	baseDBManager := manager.NewMemDB(version.Semantic1_0_0)
 
-	m := &atomic.Memory{}
-	err := m.Initialize(logging.NoLog{}, prefixdb.New([]byte{0}, baseDBManager.Current().Database))
-	if err != nil {
-		t.Fatal(err)
-	}
+	m := atomic.NewMemory(prefixdb.New([]byte{0}, baseDBManager.Current().Database))
 
 	ctx := NewContext(t)
 	ctx.SharedMemory = m.NewSharedMemory(chainID)
@@ -1904,7 +1901,7 @@ func TestClearForceAcceptedExportTx(t *testing.T) {
 		IndexTransactions: true,
 	}
 	avmConfigBytes, err := stdjson.Marshal(avmConfig)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	vm := &VM{}
 	err = vm.Initialize(
 		ctx,
@@ -1952,7 +1949,7 @@ func TestClearForceAcceptedExportTx(t *testing.T) {
 				},
 			}},
 		}},
-		DestinationChain: platformChainID,
+		DestinationChain: constants.PlatformChainID,
 		ExportedOuts: []*avax.TransferableOutput{{
 			Asset: assetID,
 			Out: &secp256k1fx.TransferOutput{

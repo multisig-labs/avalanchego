@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/snow"
 	"github.com/ava-labs/avalanchego/snow/choices"
@@ -437,7 +439,9 @@ func (ts *Topological) vote(voteStack []votes) (ids.ID, error) {
 		headBlock.shouldFalter = true
 
 		if numProcessing := len(ts.blocks) - 1; numProcessing > 0 {
-			ts.ctx.Log.Verbo("No progress was made after a vote with %d pending blocks", numProcessing)
+			ts.ctx.Log.Verbo("no progress was made after processing pending blocks",
+				zap.Int("numProcessing", numProcessing),
+			)
 			ts.Polls.Failed()
 		}
 		return ts.tail, nil
@@ -446,6 +450,7 @@ func (ts *Topological) vote(voteStack []votes) (ids.ID, error) {
 	// keep track of the new preferred block
 	newPreferred := ts.head
 	onPreferredBranch := true
+	pollSuccessful := false
 	for len(voteStack) > 0 {
 		// pop a vote off the stack
 		newStackSize := len(voteStack) - 1
@@ -468,14 +473,16 @@ func (ts *Topological) vote(voteStack []votes) (ids.ID, error) {
 		// if the block was previously marked as needing to falter, the block
 		// should falter before applying the vote
 		if shouldTransitivelyFalter {
-			ts.ctx.Log.Verbo("Resetting confidence below %s", vote.parentID)
+			ts.ctx.Log.Verbo("resetting confidence below parent",
+				zap.Stringer("parentID", vote.parentID),
+			)
 
 			parentBlock.sb.RecordUnsuccessfulPoll()
 			parentBlock.shouldFalter = false
 		}
 
 		// apply the votes for this snowball instance
-		parentBlock.sb.RecordPoll(vote.votes)
+		pollSuccessful = parentBlock.sb.RecordPoll(vote.votes) || pollSuccessful
 
 		// Only accept when you are finalized and the head.
 		if parentBlock.sb.Finalized() && ts.head == vote.parentID {
@@ -524,7 +531,13 @@ func (ts *Topological) vote(voteStack []votes) (ids.ID, error) {
 			// Therefore, we need to make sure the child is still in the tree.
 			childBlock, notRejected := ts.blocks[childID]
 			if notRejected {
-				ts.ctx.Log.Verbo("Defering confidence reset of %s. Voting for %s", childID, nextID)
+				ts.ctx.Log.Verbo("defering confidence reset of child block",
+					zap.Stringer("childID", childID),
+				)
+
+				ts.ctx.Log.Verbo("voting for next block",
+					zap.Stringer("nextID", nextID),
+				)
 
 				// If the child is ever voted for positively, the confidence
 				// must be reset first.
@@ -533,7 +546,11 @@ func (ts *Topological) vote(voteStack []votes) (ids.ID, error) {
 		}
 	}
 
-	ts.Polls.Successful()
+	if pollSuccessful {
+		ts.Polls.Successful()
+	} else {
+		ts.Polls.Failed()
+	}
 	return newPreferred, nil
 }
 
@@ -560,7 +577,9 @@ func (ts *Topological) acceptPreferredChild(n *snowmanBlock) error {
 		return err
 	}
 
-	ts.ctx.Log.Trace("accepting block %s", pref)
+	ts.ctx.Log.Trace("accepting block",
+		zap.Stringer("blkID", pref),
+	)
 	if err := child.Accept(); err != nil {
 		return err
 	}
@@ -585,7 +604,11 @@ func (ts *Topological) acceptPreferredChild(n *snowmanBlock) error {
 			continue
 		}
 
-		ts.ctx.Log.Trace("rejecting block %s due to conflict with accepted block %s", childID, pref)
+		ts.ctx.Log.Trace("rejecting block",
+			zap.String("reason", "conflict with accepted block"),
+			zap.Stringer("rejectedID", childID),
+			zap.Stringer("conflictedID", pref),
+		)
 		if err := child.Reject(); err != nil {
 			return err
 		}

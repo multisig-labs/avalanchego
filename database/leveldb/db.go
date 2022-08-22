@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/iterator"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/syndtr/goleveldb/leveldb/util"
+
+	"go.uber.org/zap"
 
 	"github.com/ava-labs/avalanchego/database"
 	"github.com/ava-labs/avalanchego/utils"
@@ -43,6 +46,12 @@ const (
 	// DefaultBitsPerKey is the number of bits to add to the bloom filter per
 	// key.
 	DefaultBitsPerKey = 10
+
+	// DefaultMaxManifestFileSize is the default maximum size of a manifest
+	// file.
+	//
+	// This avoids https://github.com/syndtr/goleveldb/issues/413.
+	DefaultMaxManifestFileSize = math.MaxInt64
 
 	// DefaultMetricUpdateFrequency is the frequency to poll the LevelDB
 	// metrics.
@@ -71,6 +80,10 @@ type Database struct {
 	closeOnce sync.Once
 	// closeCh is closed when Close() is called.
 	closeCh chan struct{}
+	// closeWg is used to wait for all goroutines created by New() to exit.
+	// This avoids racy behavior when Close() is called at the same time as
+	// Stats(). See: https://github.com/syndtr/goleveldb/issues/418
+	closeWg sync.WaitGroup
 }
 
 type config struct {
@@ -157,6 +170,13 @@ type config struct {
 	WriteBuffer      int `json:"writeBuffer"`
 	FilterBitsPerKey int `json:"filterBitsPerKey"`
 
+	// MaxManifestFileSize is the maximum size limit of the MANIFEST-****** file.
+	// When the MANIFEST-****** file grows beyond this size, LevelDB will create
+	// a new MANIFEST file.
+	//
+	// The default value is infinity.
+	MaxManifestFileSize int64 `json:"maxManifestFileSize"`
+
 	// MetricUpdateFrequency is the frequency to poll LevelDB metrics.
 	// If <= 0, LevelDB metrics aren't polled.
 	MetricUpdateFrequency time.Duration `json:"metricUpdateFrequency"`
@@ -170,6 +190,7 @@ func New(file string, configBytes []byte, log logging.Logger, namespace string, 
 		OpenFilesCacheCapacity: DefaultHandleCap,
 		WriteBuffer:            DefaultWriteBufferSize / 2,
 		FilterBitsPerKey:       DefaultBitsPerKey,
+		MaxManifestFileSize:    DefaultMaxManifestFileSize,
 		MetricUpdateFrequency:  DefaultMetricUpdateFrequency,
 	}
 	if len(configBytes) > 0 {
@@ -177,11 +198,10 @@ func New(file string, configBytes []byte, log logging.Logger, namespace string, 
 			return nil, fmt.Errorf("failed to parse db config: %w", err)
 		}
 	}
-	configJSON, err := json.Marshal(&parsedConfig)
-	if err != nil {
-		return nil, err
-	}
-	log.Info("leveldb config: %s", string(configJSON))
+
+	log.Info("creating new leveldb",
+		zap.Reflect("config", parsedConfig),
+	)
 
 	// Open the db and recover any potential corruptions
 	db, err := leveldb.OpenFile(file, &opt.Options{
@@ -199,6 +219,7 @@ func New(file string, configBytes []byte, log logging.Logger, namespace string, 
 		OpenFilesCacheCapacity:        parsedConfig.OpenFilesCacheCapacity,
 		WriteBuffer:                   parsedConfig.WriteBuffer,
 		Filter:                        filter.NewBloomFilter(parsedConfig.FilterBitsPerKey),
+		MaxManifestFileSize:           parsedConfig.MaxManifestFileSize,
 	})
 	if _, corrupted := err.(*errors.ErrCorrupted); corrupted {
 		db, err = leveldb.RecoverFile(file, nil)
@@ -219,14 +240,19 @@ func New(file string, configBytes []byte, log logging.Logger, namespace string, 
 			return nil, err
 		}
 		wrappedDB.metrics = metrics
+		wrappedDB.closeWg.Add(1)
 		go func() {
 			t := time.NewTicker(parsedConfig.MetricUpdateFrequency)
-			defer t.Stop()
+			defer func() {
+				t.Stop()
+				wrappedDB.closeWg.Done()
+			}()
 
 			for {
-				err := wrappedDB.updateMetrics()
-				if !wrappedDB.closed.GetValue() && err != nil {
-					log.Warn("failed to update leveldb metrics: %s", err)
+				if err := wrappedDB.updateMetrics(); err != nil {
+					log.Warn("failed to update leveldb metrics",
+						zap.Error(err),
+					)
 				}
 
 				select {
@@ -326,6 +352,7 @@ func (db *Database) Close() error {
 	db.closeOnce.Do(func() {
 		close(db.closeCh)
 	})
+	db.closeWg.Wait()
 	return updateError(db.DB.Close())
 }
 
