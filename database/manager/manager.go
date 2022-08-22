@@ -18,7 +18,6 @@ import (
 	"github.com/ava-labs/avalanchego/database/memdb"
 	"github.com/ava-labs/avalanchego/database/meterdb"
 	"github.com/ava-labs/avalanchego/database/prefixdb"
-	"github.com/ava-labs/avalanchego/database/rocksdb"
 	"github.com/ava-labs/avalanchego/utils"
 	"github.com/ava-labs/avalanchego/utils/logging"
 	"github.com/ava-labs/avalanchego/utils/wrappers"
@@ -74,29 +73,6 @@ type manager struct {
 	databases []*VersionedDatabase
 }
 
-// NewRocksDB creates a database manager of rocksDBs at [filePath] by creating a
-// database instance from each directory with a version <= [currentVersion]. If
-// [includePreviousVersions], opens previous database versions and includes them
-// in the returned Manager.
-func NewRocksDB(
-	dbDirPath string,
-	dbConfig []byte,
-	log logging.Logger,
-	currentVersion version.Version,
-	namespace string,
-	reg prometheus.Registerer,
-) (Manager, error) {
-	return new(
-		rocksdb.New,
-		dbDirPath,
-		dbConfig,
-		log,
-		currentVersion,
-		namespace,
-		reg,
-	)
-}
-
 // NewLevelDB creates a database manager of levelDBs at [filePath] by creating a
 // database instance from each directory with a version <= [currentVersion]. If
 // [includePreviousVersions], opens previous database versions and includes them
@@ -105,7 +81,7 @@ func NewLevelDB(
 	dbDirPath string,
 	dbConfig []byte,
 	log logging.Logger,
-	currentVersion version.Version,
+	currentVersion *version.Semantic,
 	namespace string,
 	reg prometheus.Registerer,
 ) (Manager, error) {
@@ -129,7 +105,7 @@ func new(
 	dbDirPath string,
 	dbConfig []byte,
 	log logging.Logger,
-	currentVersion version.Version,
+	currentVersion *version.Semantic,
 	namespace string,
 	reg prometheus.Registerer,
 ) (Manager, error) {
@@ -170,7 +146,7 @@ func new(
 			return nil
 		}
 		_, dbName := filepath.Split(path)
-		dbVersion, err := version.DefaultParser.Parse(dbName)
+		dbVersion, err := version.Parse(dbName)
 		if err != nil {
 			// If the database directory contains any directories that don't
 			// match the expected version format, ignore them.
@@ -218,7 +194,7 @@ func new(
 
 // NewMemDB returns a database manager with a single memdb instance with
 // [currentVersion].
-func NewMemDB(currentVersion version.Version) Manager {
+func NewMemDB(currentVersion *version.Semantic) Manager {
 	return &manager{
 		databases: []*VersionedDatabase{
 			{

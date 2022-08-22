@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/x509"
-	"encoding/binary"
 	"errors"
 	"io"
 	"math"
@@ -16,11 +15,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/message"
 	"github.com/ava-labs/avalanchego/utils"
 	"github.com/ava-labs/avalanchego/utils/constants"
-	"github.com/ava-labs/avalanchego/utils/formatting"
 	"github.com/ava-labs/avalanchego/utils/ips"
 	"github.com/ava-labs/avalanchego/utils/json"
 	"github.com/ava-labs/avalanchego/utils/wrappers"
@@ -68,7 +68,7 @@ type Peer interface {
 
 	// Version returns the claimed node version this peer is running. It should
 	// only be called after [Ready] returns true.
-	Version() version.Application
+	Version() *version.Application
 
 	// TrackedSubnets returns the subnets this peer is running. It should only
 	// be called after [Ready] returns true.
@@ -117,7 +117,7 @@ type peer struct {
 	ip *SignedIP
 	// version is the claimed version the peer is running that we received in
 	// the Version message.
-	version version.Application
+	version *version.Application
 	// trackedSubnets is the subset of subnetIDs the peer sent us in the Version
 	// message that we are also tracking.
 	trackedSubnets ids.Set
@@ -157,6 +157,10 @@ type peer struct {
 	lastSent, lastReceived int64
 }
 
+// Start a new peer instance.
+//
+// Invariant: There must only be one peer running at a time with a reference to
+// the same [config.InboundMsgThrottler].
 func Start(
 	config *Config,
 	conn net.Conn,
@@ -177,8 +181,6 @@ func Start(
 		onClosingCtxCancel: onClosingCtxCancel,
 		onClosed:           make(chan struct{}),
 	}
-
-	p.trackedSubnets.Add(constants.PrimaryNetworkID)
 
 	go p.readMessages()
 	go p.writeMessages()
@@ -237,7 +239,7 @@ func (p *peer) Info() Info {
 
 func (p *peer) IP() *SignedIP { return p.ip }
 
-func (p *peer) Version() version.Application { return p.version }
+func (p *peer) Version() *version.Application { return p.version }
 
 func (p *peer) TrackedSubnets() ids.Set { return p.trackedSubnets }
 
@@ -255,9 +257,9 @@ func (p *peer) Send(ctx context.Context, msg message.OutboundMessage) bool {
 func (p *peer) StartClose() {
 	p.startClosingOnce.Do(func() {
 		if err := p.conn.Close(); err != nil {
-			p.Log.Debug(
-				"closing connection to %s resulted in an error: %s",
-				p.id, err,
+			p.Log.Debug("failed to close connection",
+				zap.Stringer("nodeID", p.id),
+				zap.Error(err),
 			)
 		}
 
@@ -312,48 +314,66 @@ func (p *peer) readMessages() {
 	for {
 		// Time out and close connection if we can't read the message length
 		if err := p.conn.SetReadDeadline(p.nextTimeout()); err != nil {
-			p.Log.Verbo(
-				"error setting the connection read timeout on %s: %s",
-				p.id, err,
+			p.Log.Verbo("error setting the connection read timeout",
+				zap.Stringer("nodeID", p.id),
+				zap.Error(err),
 			)
 			return
 		}
 
 		// Read the message length
 		if _, err := io.ReadFull(reader, msgLenBytes); err != nil {
-			p.Log.Verbo(
-				"error reading from %s: %s",
-				p.id, err,
+			p.Log.Verbo("error reading message",
+				zap.Stringer("nodeID", p.id),
+				zap.Error(err),
 			)
 			return
 		}
 
 		// Parse the message length
-		msgLen := binary.BigEndian.Uint32(msgLenBytes)
-
-		// Make sure the message length is valid.
-		if msgLen > constants.DefaultMaxMessageSize {
-			p.Log.Verbo("too large message length %d from %s", msgLen, p.id)
+		msgLen, isProto, err := readMsgLen(msgLenBytes, constants.DefaultMaxMessageSize)
+		if err != nil {
+			p.Log.Verbo("error reading message length",
+				zap.Stringer("nodeID", p.id),
+				zap.Error(err),
+			)
+			return
+		}
+		if isProto {
+			p.Log.Debug("unexpected isProto=true from 'readMsgLen' (not implemented yet)")
 			return
 		}
 
 		// Wait until the throttler says we can proceed to read the message.
-		// Note that when we are done handling this message, or give up
-		// trying to read it, we must call [p.InboundMsgThrottler.Release]
-		// to give back the bytes used by this message.
-		p.InboundMsgThrottler.Acquire(p.onClosingCtx, uint64(msgLen), p.id)
-
+		//
 		// Invariant: When done processing this message, onFinishedHandling() is
 		// called exactly once. If this is not honored, the message throttler
 		// will leak until no new messages can be read. You can look at message
 		// throttler metrics to verify that there is no leak.
-		onFinishedHandling := func() { p.InboundMsgThrottler.Release(uint64(msgLen), p.id) }
+		//
+		// Invariant: There must only be one call to Acquire at any given time
+		// with the same nodeID. In this package, only this goroutine ever
+		// performs Acquire. Additionally, we ensure that this goroutine has
+		// exited before calling [Network.Disconnected] to guarantee that there
+		// can't be multiple instances of this goroutine running over different
+		// peer instances.
+		onFinishedHandling := p.InboundMsgThrottler.Acquire(
+			p.onClosingCtx,
+			uint64(msgLen),
+			p.id,
+		)
+
+		// If the peer is shutting down, there's no need to read the message.
+		if p.onClosingCtx.Err() != nil {
+			onFinishedHandling()
+			return
+		}
 
 		// Time out and close connection if we can't read message
 		if err := p.conn.SetReadDeadline(p.nextTimeout()); err != nil {
-			p.Log.Verbo(
-				"error setting the connection read timeout on %s: %s",
-				p.id, err,
+			p.Log.Verbo("error setting the connection read timeout",
+				zap.Stringer("nodeID", p.id),
+				zap.Error(err),
 			)
 			onFinishedHandling()
 			return
@@ -362,9 +382,9 @@ func (p *peer) readMessages() {
 		// Read the message
 		msgBytes := make([]byte, msgLen)
 		if _, err := io.ReadFull(reader, msgBytes); err != nil {
-			p.Log.Verbo(
-				"error reading from %s: %s",
-				p.id, err,
+			p.Log.Verbo("error reading message",
+				zap.Stringer("nodeID", p.id),
+				zap.Error(err),
 			)
 			onFinishedHandling()
 			return
@@ -378,17 +398,18 @@ func (p *peer) readMessages() {
 		// finished.
 		p.ResourceTracker.StartProcessing(p.id, p.Clock.Time())
 
-		p.Log.Verbo(
-			"parsing message from %s:\n%s",
-			p.id, formatting.DumpBytes(msgBytes),
+		p.Log.Verbo("parsing message",
+			zap.Stringer("nodeID", p.id),
+			zap.Binary("message", msgBytes),
 		)
 
 		// Parse the message
 		msg, err := p.MessageCreator.Parse(msgBytes, p.id, onFinishedHandling)
 		if err != nil {
-			p.Log.Verbo(
-				"failed to parse message from %s: %s\n%s",
-				p.id, err, formatting.DumpBytes(msgBytes),
+			p.Log.Verbo("failed to parse message",
+				zap.Stringer("nodeID", p.id),
+				zap.Binary("message", msgBytes),
+				zap.Error(err),
 			)
 
 			p.Metrics.FailedToParse.Inc()
@@ -435,9 +456,9 @@ func (p *peer) writeMessages() {
 		// Make sure the peer was fully sent all prior messages before
 		// blocking.
 		if err := writer.Flush(); err != nil {
-			p.Log.Verbo(
-				"couldn't flush writer to %s: %s",
-				p.id, err,
+			p.Log.Verbo("failed to flush writer",
+				zap.Stringer("nodeID", p.id),
+				zap.Error(err),
 			)
 			return
 		}
@@ -454,28 +475,37 @@ func (p *peer) writeMessages() {
 
 func (p *peer) writeMessage(writer io.Writer, msg message.OutboundMessage) {
 	msgBytes := msg.Bytes()
-	p.Log.Verbo(
-		"sending message to %s:\n%s",
-		p.id, formatting.DumpBytes(msgBytes),
+	p.Log.Verbo("sending message",
+		zap.Stringer("nodeID", p.id),
+		zap.Binary("message", msgBytes),
 	)
 
-	msgLen := uint32(len(msgBytes))
-	msgLenBytes := [wrappers.IntLen]byte{}
-	binary.BigEndian.PutUint32(msgLenBytes[:], msgLen)
-
 	if err := p.conn.SetWriteDeadline(p.nextTimeout()); err != nil {
-		p.Log.Verbo(
-			"error setting write deadline to %s due to: %s",
-			p.id, err,
+		p.Log.Verbo("error setting write deadline",
+			zap.Stringer("nodeID", p.id),
+			zap.Error(err),
 		)
 		msg.DecRef()
+		return
+	}
+
+	msgLen := uint32(len(msgBytes))
+	msgLenBytes, err := writeMsgLen(msgLen, false /* true to use protobufs */, constants.DefaultMaxMessageSize)
+	if err != nil {
+		p.Log.Verbo("error writing message length",
+			zap.Stringer("nodeID", p.id),
+			zap.Error(err),
+		)
 		return
 	}
 
 	// Write the message
 	var buf net.Buffers = [][]byte{msgLenBytes[:], msgBytes}
 	if _, err := io.CopyN(writer, &buf, int64(wrappers.IntLen+msgLen)); err != nil {
-		p.Log.Verbo("error writing to %s: %s", p.id, err)
+		p.Log.Verbo("error writing message",
+			zap.Stringer("nodeID", p.id),
+			zap.Error(err),
+		)
 		msg.DecRef()
 		return
 	}
@@ -499,18 +529,20 @@ func (p *peer) sendPings() {
 		select {
 		case <-sendPingsTicker.C:
 			if !p.Network.AllowConnection(p.id) {
-				p.Log.Debug(
-					"disconnecting from peer %s because the peer's connection is no longer desired",
-					p.id,
+				p.Log.Debug("disconnecting from peer",
+					zap.String("reason", "connection is no longer desired"),
+					zap.Stringer("nodeID", p.id),
 				)
 				return
 			}
 
 			if p.finishedHandshake.GetValue() {
 				if err := p.VersionCompatibility.Compatible(p.version); err != nil {
-					p.Log.Debug(
-						"disconnecting from peer %s version (%s) not compatible: %s",
-						p.id, p.version, err,
+					p.Log.Debug("disconnecting from peer",
+						zap.String("reason", "version not compatible"),
+						zap.Stringer("nodeID", p.id),
+						zap.Stringer("peerVersion", p.version),
+						zap.Error(err),
 					)
 					return
 				}
@@ -546,8 +578,10 @@ func (p *peer) handle(msg message.InboundMessage) {
 	}
 	if !p.finishedHandshake.GetValue() {
 		p.Log.Debug(
-			"dropping %s from %s because handshake isn't finished",
-			op, p.id,
+			"dropping message",
+			zap.String("reason", "handshake isn't finished"),
+			zap.Stringer("nodeID", p.id),
+			zap.Stringer("messageOp", op),
 		)
 		msg.OnFinishedHandling()
 		return
@@ -576,14 +610,17 @@ func (p *peer) handlePong(msg message.InboundMessage) {
 
 func (p *peer) handleVersion(msg message.InboundMessage) {
 	if p.gotVersion.GetValue() {
-		p.Log.Verbo("dropping duplicated version message from %s", p.id)
+		p.Log.Verbo("dropping duplicated version message",
+			zap.Stringer("nodeID", p.id),
+		)
 		return
 	}
 
 	if peerNetworkID := msg.Get(message.NetworkID).(uint32); peerNetworkID != p.NetworkID {
-		p.Log.Debug(
-			"networkID of %s (%d) doesn't match our's (%d)",
-			p.id, peerNetworkID, p.NetworkID,
+		p.Log.Debug("networkID mismatch",
+			zap.Stringer("nodeID", p.id),
+			zap.Uint32("peerNetworkID", peerNetworkID),
+			zap.Uint32("ourNetworkID", p.NetworkID),
 		)
 		p.StartClose()
 		return
@@ -593,14 +630,16 @@ func (p *peer) handleVersion(msg message.InboundMessage) {
 	peerTime := float64(msg.Get(message.MyTime).(uint64))
 	if math.Abs(peerTime-myTime) > p.MaxClockDifference.Seconds() {
 		if p.Beacons.Contains(p.id) {
-			p.Log.Warn(
-				"beacon %s reports time (%d) that is too far out of sync with our's (%d)",
-				p.id, uint64(peerTime), uint64(myTime),
+			p.Log.Warn("beacon reports out of sync time",
+				zap.Stringer("beaconID", p.id),
+				zap.Uint64("beaconTime", uint64(peerTime)),
+				zap.Uint64("ourTime", uint64(myTime)),
 			)
 		} else {
-			p.Log.Debug(
-				"peer %s reports time (%d) that is too far out of sync with our's (%d)",
-				p.id, uint64(peerTime), uint64(myTime),
+			p.Log.Debug("peer reports out of sync time",
+				zap.Stringer("beaconID", p.id),
+				zap.Uint64("beaconTime", uint64(peerTime)),
+				zap.Uint64("ourTime", uint64(myTime)),
 			)
 		}
 		p.StartClose()
@@ -608,11 +647,11 @@ func (p *peer) handleVersion(msg message.InboundMessage) {
 	}
 
 	peerVersionStr := msg.Get(message.VersionStr).(string)
-	peerVersion, err := p.VersionParser.Parse(peerVersionStr)
+	peerVersion, err := version.ParseApplication(peerVersionStr)
 	if err != nil {
-		p.Log.Debug(
-			"version of %s could not be parsed: %s",
-			p.id, err,
+		p.Log.Debug("failed to parse peer version",
+			zap.Stringer("nodeID", p.id),
+			zap.Error(err),
 		)
 		p.StartClose()
 		return
@@ -621,21 +660,23 @@ func (p *peer) handleVersion(msg message.InboundMessage) {
 
 	if p.VersionCompatibility.Version().Before(peerVersion) {
 		if p.Beacons.Contains(p.id) {
-			p.Log.Info(
-				"beacon %s attempting to connect with newer version %s. You may want to update your client",
-				p.id, peerVersion,
+			p.Log.Info("beacon attempting to connect with newer version. You may want to update your client",
+				zap.Stringer("nodeID", p.id),
+				zap.Stringer("beaconVersion", peerVersion),
 			)
 		} else {
-			p.Log.Debug(
-				"peer %s attempting to connect with newer version %s. You may want to update your client",
-				p.id, peerVersion,
+			p.Log.Debug("peer attempting to connect with newer version. You may want to update your client",
+				zap.Stringer("nodeID", p.id),
+				zap.Stringer("peerVersion", peerVersion),
 			)
 		}
 	}
 
 	if err := p.VersionCompatibility.Compatible(peerVersion); err != nil {
-		p.Log.Verbo("peer %s version (%s) not compatible: %s",
-			p.id, peerVersion, err,
+		p.Log.Verbo("peer version not compatible",
+			zap.Stringer("nodeID", p.id),
+			zap.Stringer("peerVersion", peerVersion),
+			zap.Error(err),
 		)
 		p.StartClose()
 		return
@@ -646,9 +687,9 @@ func (p *peer) handleVersion(msg message.InboundMessage) {
 	// future here.
 	versionTime := msg.Get(message.VersionTime).(uint64)
 	if float64(versionTime)-myTime > p.MaxClockDifference.Seconds() {
-		p.Log.Debug(
-			"peer %s attempting to connect with version timestamp (%d) too far in the future",
-			p.id, versionTime,
+		p.Log.Debug("peer attempting to connect with version timestamp too far in the future",
+			zap.Stringer("nodeID", p.id),
+			zap.Uint64("versionTime", versionTime),
 		)
 		p.StartClose()
 		return
@@ -661,9 +702,9 @@ func (p *peer) handleVersion(msg message.InboundMessage) {
 	for _, subnetIDBytes := range subnetIDsBytes {
 		subnetID, err := ids.ToID(subnetIDBytes)
 		if err != nil {
-			p.Log.Debug(
-				"tracked subnet of %s could not be parsed: %s",
-				p.id, err,
+			p.Log.Debug("failed to parse peer's tracked subnets",
+				zap.Stringer("nodeID", p.id),
+				zap.Error(err),
 			)
 			p.StartClose()
 			return
@@ -682,8 +723,9 @@ func (p *peer) handleVersion(msg message.InboundMessage) {
 		Signature: msg.Get(message.SigBytes).([]byte),
 	}
 	if err := p.ip.Verify(p.cert); err != nil {
-		p.Log.Debug("signature verification failed for %s: %s",
-			p.id, err,
+		p.Log.Debug("signature verification failed",
+			zap.Stringer("nodeID", p.id),
+			zap.Error(err),
 		)
 		p.StartClose()
 		return

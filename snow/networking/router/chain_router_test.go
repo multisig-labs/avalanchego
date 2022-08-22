@@ -10,7 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/message"
@@ -31,7 +31,7 @@ import (
 func TestShutdown(t *testing.T) {
 	vdrs := validators.NewSet()
 	err := vdrs.AddWeight(ids.GenerateTestNodeID(), 1)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	benchlist := benchlist.NewNoBenchlist()
 	tm, err := timeout.NewManager(
 		&timer.AdaptiveTimeoutConfig{
@@ -53,16 +53,16 @@ func TestShutdown(t *testing.T) {
 	chainRouter := ChainRouter{}
 	metrics := prometheus.NewRegistry()
 	mc, err := message.NewCreator(metrics, true, "dummyNamespace", 10*time.Second)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	err = chainRouter.Initialize(ids.EmptyNodeID, logging.NoLog{}, mc, tm, time.Second, ids.Set{}, nil, HealthConfig{}, "", prometheus.NewRegistry())
-	assert.NoError(t, err)
+	err = chainRouter.Initialize(ids.EmptyNodeID, logging.NoLog{}, mc, tm, time.Second, ids.Set{}, ids.Set{}, nil, HealthConfig{}, "", prometheus.NewRegistry())
+	require.NoError(t, err)
 
 	shutdownCalled := make(chan struct{}, 1)
 
 	ctx := snow.DefaultConsensusContextTest()
 	resourceTracker, err := tracker.NewResourceTracker(prometheus.NewRegistry(), resource.NoUsage, meter.ContinuousFactory{}, time.Second)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	handler, err := handler.New(
 		mc,
 		ctx,
@@ -72,7 +72,7 @@ func TestShutdown(t *testing.T) {
 		time.Second,
 		resourceTracker,
 	)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	bootstrapper := &common.BootstrapperTest{
 		BootstrapableTest: common.BootstrapableTest{
@@ -86,7 +86,7 @@ func TestShutdown(t *testing.T) {
 	bootstrapper.CantGossip = false
 	bootstrapper.ContextF = func() *snow.ConsensusContext { return ctx }
 	bootstrapper.ShutdownF = func() error { shutdownCalled <- struct{}{}; return nil }
-	bootstrapper.ConnectedF = func(nodeID ids.NodeID, nodeVersion version.Application) error { return nil }
+	bootstrapper.ConnectedF = func(nodeID ids.NodeID, nodeVersion *version.Application) error { return nil }
 	bootstrapper.HaltF = func() {}
 	handler.SetBootstrapper(bootstrapper)
 
@@ -95,7 +95,7 @@ func TestShutdown(t *testing.T) {
 	engine.CantGossip = false
 	engine.ContextF = func() *snow.ConsensusContext { return ctx }
 	engine.ShutdownF = func() error { shutdownCalled <- struct{}{}; return nil }
-	engine.ConnectedF = func(nodeID ids.NodeID, nodeVersion version.Application) error { return nil }
+	engine.ConnectedF = func(nodeID ids.NodeID, nodeVersion *version.Application) error { return nil }
 	engine.HaltF = func() {}
 	handler.SetConsensus(engine)
 	ctx.SetState(snow.NormalOp) // assumed bootstrap is done
@@ -125,7 +125,7 @@ func TestShutdownTimesOut(t *testing.T) {
 	nodeID := ids.EmptyNodeID
 	vdrs := validators.NewSet()
 	err := vdrs.AddWeight(ids.GenerateTestNodeID(), 1)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	benchlist := benchlist.NewNoBenchlist()
 	metrics := prometheus.NewRegistry()
 	// Ensure that the Ancestors request does not timeout
@@ -149,7 +149,7 @@ func TestShutdownTimesOut(t *testing.T) {
 	chainRouter := ChainRouter{}
 
 	mc, err := message.NewCreator(metrics, true, "dummyNamespace", 10*time.Second)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = chainRouter.Initialize(ids.EmptyNodeID,
 		logging.NoLog{},
@@ -157,16 +157,17 @@ func TestShutdownTimesOut(t *testing.T) {
 		tm,
 		time.Millisecond,
 		ids.Set{},
+		ids.Set{},
 		nil,
 		HealthConfig{},
 		"",
 		metrics,
 	)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	ctx := snow.DefaultConsensusContextTest()
 	resourceTracker, err := tracker.NewResourceTracker(prometheus.NewRegistry(), resource.NoUsage, meter.ContinuousFactory{}, time.Second)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	handler, err := handler.New(
 		mc,
 		ctx,
@@ -176,7 +177,7 @@ func TestShutdownTimesOut(t *testing.T) {
 		time.Second,
 		resourceTracker,
 	)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	bootstrapFinished := make(chan struct{}, 1)
 	bootstrapper := &common.BootstrapperTest{
@@ -190,7 +191,7 @@ func TestShutdownTimesOut(t *testing.T) {
 	bootstrapper.Default(true)
 	bootstrapper.CantGossip = false
 	bootstrapper.ContextF = func() *snow.ConsensusContext { return ctx }
-	bootstrapper.ConnectedF = func(nodeID ids.NodeID, nodeVersion version.Application) error { return nil }
+	bootstrapper.ConnectedF = func(nodeID ids.NodeID, nodeVersion *version.Application) error { return nil }
 	bootstrapper.HaltF = func() {}
 	bootstrapper.AncestorsF = func(nodeID ids.NodeID, requestID uint32, containers [][]byte) error {
 		// Ancestors blocks for two seconds
@@ -258,10 +259,10 @@ func TestRouterTimeout(t *testing.T) {
 	chainRouter := ChainRouter{}
 	metrics := prometheus.NewRegistry()
 	mc, err := message.NewCreator(metrics, true, "dummyNamespace", 10*time.Second)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	err = chainRouter.Initialize(ids.EmptyNodeID, logging.NoLog{}, mc, tm, time.Millisecond, ids.Set{}, nil, HealthConfig{}, "", prometheus.NewRegistry())
-	assert.NoError(t, err)
+	err = chainRouter.Initialize(ids.EmptyNodeID, logging.NoLog{}, mc, tm, time.Millisecond, ids.Set{}, ids.Set{}, nil, HealthConfig{}, "", prometheus.NewRegistry())
+	require.NoError(t, err)
 
 	// Create bootstrapper, engine and handler
 	var (
@@ -275,10 +276,10 @@ func TestRouterTimeout(t *testing.T) {
 	ctx := snow.DefaultConsensusContextTest()
 	vdrs := validators.NewSet()
 	err = vdrs.AddWeight(ids.GenerateTestNodeID(), 1)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	resourceTracker, err := tracker.NewResourceTracker(prometheus.NewRegistry(), resource.NoUsage, meter.ContinuousFactory{}, time.Second)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	handler, err := handler.New(
 		mc,
 		ctx,
@@ -288,7 +289,7 @@ func TestRouterTimeout(t *testing.T) {
 		time.Second,
 		resourceTracker,
 	)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	bootstrapper := &common.BootstrapperTest{
 		BootstrapableTest: common.BootstrapableTest{
@@ -301,7 +302,7 @@ func TestRouterTimeout(t *testing.T) {
 	bootstrapper.Default(true)
 	bootstrapper.CantGossip = false
 	bootstrapper.ContextF = func() *snow.ConsensusContext { return ctx }
-	bootstrapper.ConnectedF = func(nodeID ids.NodeID, nodeVersion version.Application) error { return nil }
+	bootstrapper.ConnectedF = func(nodeID ids.NodeID, nodeVersion *version.Application) error { return nil }
 	bootstrapper.HaltF = func() {}
 	bootstrapper.GetFailedF = func(nodeID ids.NodeID, requestID uint32) error { wg.Done(); calledGetFailed = true; return nil }
 	bootstrapper.GetAncestorsFailedF = func(nodeID ids.NodeID, requestID uint32) error {
@@ -356,7 +357,7 @@ func TestRouterTimeout(t *testing.T) {
 
 	chainRouter.lock.Lock()
 	defer chainRouter.lock.Unlock()
-	assert.True(t, calledGetFailed && calledGetAncestorsFailed && calledQueryFailed2 && calledGetAcceptedFailed && calledGetAcceptedFrontierFailed)
+	require.True(t, calledGetFailed && calledGetAncestorsFailed && calledQueryFailed2 && calledGetAcceptedFailed && calledGetAcceptedFrontierFailed)
 }
 
 func TestRouterClearTimeouts(t *testing.T) {
@@ -382,20 +383,19 @@ func TestRouterClearTimeouts(t *testing.T) {
 	chainRouter := ChainRouter{}
 	metrics := prometheus.NewRegistry()
 	mc, err := message.NewCreator(metrics, true, "dummyNamespace", 10*time.Second)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	assert.NoError(t, err)
-	err = chainRouter.Initialize(ids.EmptyNodeID, logging.NoLog{}, mc, tm, time.Millisecond, ids.Set{}, nil, HealthConfig{}, "", prometheus.NewRegistry())
-	assert.NoError(t, err)
+	err = chainRouter.Initialize(ids.EmptyNodeID, logging.NoLog{}, mc, tm, time.Millisecond, ids.Set{}, ids.Set{}, nil, HealthConfig{}, "", prometheus.NewRegistry())
+	require.NoError(t, err)
 
 	// Create bootstrapper, engine and handler
 	ctx := snow.DefaultConsensusContextTest()
 	vdrs := validators.NewSet()
 	err = vdrs.AddWeight(ids.GenerateTestNodeID(), 1)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	resourceTracker, err := tracker.NewResourceTracker(prometheus.NewRegistry(), resource.NoUsage, meter.ContinuousFactory{}, time.Second)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	handler, err := handler.New(
 		mc,
 		ctx,
@@ -405,7 +405,7 @@ func TestRouterClearTimeouts(t *testing.T) {
 		time.Second,
 		resourceTracker,
 	)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	bootstrapper := &common.BootstrapperTest{
 		BootstrapableTest: common.BootstrapableTest{
@@ -468,7 +468,7 @@ func TestRouterClearTimeouts(t *testing.T) {
 	inMsg = mc.InboundAcceptedFrontier(ctx.ChainID, 4, nil, vID)
 	chainRouter.HandleInbound(inMsg)
 
-	assert.Equal(t, chainRouter.timedRequests.Len(), 0)
+	require.Equal(t, chainRouter.timedRequests.Len(), 0)
 }
 
 func TestValidatorOnlyMessageDrops(t *testing.T) {
@@ -495,10 +495,10 @@ func TestValidatorOnlyMessageDrops(t *testing.T) {
 	chainRouter := ChainRouter{}
 	metrics := prometheus.NewRegistry()
 	mc, err := message.NewCreator(metrics, true, "dummyNamespace", 10*time.Second)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	err = chainRouter.Initialize(ids.EmptyNodeID, logging.NoLog{}, mc, tm, time.Millisecond, ids.Set{}, nil, HealthConfig{}, "", prometheus.NewRegistry())
-	assert.NoError(t, err)
+	err = chainRouter.Initialize(ids.EmptyNodeID, logging.NoLog{}, mc, tm, time.Millisecond, ids.Set{}, ids.Set{}, nil, HealthConfig{}, "", prometheus.NewRegistry())
+	require.NoError(t, err)
 
 	// Create bootstrapper, engine and handler
 	calledF := false
@@ -509,9 +509,9 @@ func TestValidatorOnlyMessageDrops(t *testing.T) {
 	vdrs := validators.NewSet()
 	vID := ids.GenerateTestNodeID()
 	err = vdrs.AddWeight(vID, 1)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	resourceTracker, err := tracker.NewResourceTracker(prometheus.NewRegistry(), resource.NoUsage, meter.ContinuousFactory{}, time.Second)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	handler, err := handler.New(
 		mc,
 		ctx,
@@ -521,7 +521,7 @@ func TestValidatorOnlyMessageDrops(t *testing.T) {
 		time.Second,
 		resourceTracker,
 	)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	bootstrapper := &common.BootstrapperTest{
 		BootstrapableTest: common.BootstrapableTest{
@@ -564,7 +564,7 @@ func TestValidatorOnlyMessageDrops(t *testing.T) {
 	)
 	chainRouter.HandleInbound(inMsg)
 
-	assert.False(t, calledF) // should not be called
+	require.False(t, calledF) // should not be called
 
 	// Validator case
 	calledF = false
@@ -576,21 +576,21 @@ func TestValidatorOnlyMessageDrops(t *testing.T) {
 	chainRouter.HandleInbound(inMsg)
 
 	wg.Wait()
-	assert.True(t, calledF) // should be called since this is a validator request
+	require.True(t, calledF) // should be called since this is a validator request
 
 	// register a validator request
 	reqID++
 	chainRouter.RegisterRequest(vID, ctx.ChainID, reqID, message.Get)
-	assert.Equal(t, 1, chainRouter.timedRequests.Len())
+	require.Equal(t, 1, chainRouter.timedRequests.Len())
 
 	// remove it from validators
 	err = vdrs.Set(validators.NewSet().List())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	inMsg = mc.InboundPut(ctx.ChainID, reqID, ids.GenerateTestID(), nil, nID)
 	chainRouter.HandleInbound(inMsg)
 
 	// shouldn't clear out timed request, as the request should be cleared when
 	// the GetFailed message is sent
-	assert.Equal(t, 1, chainRouter.timedRequests.Len())
+	require.Equal(t, 1, chainRouter.timedRequests.Len())
 }

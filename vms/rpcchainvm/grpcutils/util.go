@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"time"
 
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
@@ -39,6 +41,21 @@ const (
 	// of Timeout and if no activity is seen even after that the connection is
 	// closed. grpc-go default 20s
 	defaultServerKeepAliveTimeout = 20 * time.Second
+	// Duration for the maximum amount of time a http2 connection can exist
+	// before sending GOAWAY. Internally in gRPC a +-10% jitter is added to
+	// mitigate retry storms.
+	defaultServerMaxConnectionAge = 10 * time.Minute
+	// After MaxConnectionAge, MaxConnectionAgeGrace specifies the amount of time
+	// between when the server sends a GOAWAY to the client to initiate graceful
+	// shutdown, and when the server closes the connection.
+	//
+	// The server expects that this grace period will allow the client to complete
+	// any ongoing requests, after which it will forcefully terminate the connection.
+	// If a request takes longer than this grace period, it will *fail*.
+	// We *never* want an RPC to live longer than this value.
+	//
+	// invariant: Any value < 1 second will be internally overridden by gRPC.
+	defaultServerMaxConnectionAgeGrace = math.MaxInt64
 
 	// Client:
 
@@ -59,8 +76,11 @@ const (
 
 var (
 	DefaultDialOptions = []grpc.DialOption{
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(math.MaxInt)),
-		grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(math.MaxInt)),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(math.MaxInt),
+			grpc.MaxCallSendMsgSize(math.MaxInt),
+			grpc.WaitForReady(true),
+		),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                defaultClientKeepAliveTime,
 			Timeout:             defaultClientKeepAliveTimeOut,
@@ -77,11 +97,24 @@ var (
 			PermitWithoutStream: defaultPermitWithoutStream,
 		}),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
-			Time:    defaultServerKeepAliveInterval,
-			Timeout: defaultServerKeepAliveTimeout,
+			Time:                  defaultServerKeepAliveInterval,
+			Timeout:               defaultServerKeepAliveTimeout,
+			MaxConnectionAge:      defaultServerMaxConnectionAge,
+			MaxConnectionAgeGrace: defaultServerMaxConnectionAgeGrace,
 		}),
 	}
 )
+
+// DialOptsWithMetrics registers gRPC client metrics via chain interceptors.
+func DialOptsWithMetrics(clientMetrics *grpc_prometheus.ClientMetrics) []grpc.DialOption {
+	return append(DefaultDialOptions,
+		// Use chain interceptors to ensure custom/default interceptors are
+		// applied correctly.
+		// ref. https://github.com/kubernetes/kubernetes/pull/105069
+		grpc.WithChainStreamInterceptor(clientMetrics.StreamClientInterceptor()),
+		grpc.WithChainUnaryInterceptor(clientMetrics.UnaryClientInterceptor()),
+	)
+}
 
 func Errorf(code int, tmpl string, args ...interface{}) error {
 	return GetGRPCErrorFromHTTPResponse(&httppb.HandleSimpleHTTPResponse{

@@ -33,18 +33,17 @@ var (
 // Info is the API service for unprivileged info on a node
 type Info struct {
 	Parameters
-	log           logging.Logger
-	myIP          ips.DynamicIPPort
-	networking    network.Network
-	chainManager  chains.Manager
-	vmManager     vms.Manager
-	versionParser version.ApplicationParser
-	validators    validators.Set
-	benchlist     benchlist.Manager
+	log          logging.Logger
+	myIP         ips.DynamicIPPort
+	networking   network.Network
+	chainManager chains.Manager
+	vmManager    vms.Manager
+	validators   validators.Set
+	benchlist    benchlist.Manager
 }
 
 type Parameters struct {
-	Version               version.Application
+	Version               *version.Application
 	NodeID                ids.NodeID
 	NetworkID             uint32
 	TxFee                 uint64
@@ -62,7 +61,6 @@ func NewService(
 	vmManager vms.Manager,
 	myIP ips.DynamicIPPort,
 	network network.Network,
-	versionParser version.ApplicationParser,
 	validators validators.Set,
 	benchlist benchlist.Manager,
 ) (*common.HTTPHandler, error) {
@@ -71,15 +69,14 @@ func NewService(
 	newServer.RegisterCodec(codec, "application/json")
 	newServer.RegisterCodec(codec, "application/json;charset=UTF-8")
 	if err := newServer.RegisterService(&Info{
-		Parameters:    parameters,
-		log:           log,
-		chainManager:  chainManager,
-		vmManager:     vmManager,
-		myIP:          myIP,
-		networking:    network,
-		versionParser: versionParser,
-		validators:    validators,
-		benchlist:     benchlist,
+		Parameters:   parameters,
+		log:          log,
+		chainManager: chainManager,
+		vmManager:    vmManager,
+		myIP:         myIP,
+		networking:   network,
+		validators:   validators,
+		benchlist:    benchlist,
 	}, "info"); err != nil {
 		return nil, err
 	}
@@ -234,7 +231,9 @@ type IsBootstrappedResponse struct {
 // IsBootstrapped returns nil and sets [reply.IsBootstrapped] == true iff [args.Chain] exists and is done bootstrapping
 // Returns an error if the chain doesn't exist
 func (service *Info) IsBootstrapped(_ *http.Request, args *IsBootstrappedArgs, reply *IsBootstrappedResponse) error {
-	service.log.Debug("Info: IsBootstrapped called with chain: %s", args.Chain)
+	service.log.Debug("Info: IsBootstrapped called",
+		logging.UserString("chain", args.Chain),
+	)
 
 	if args.Chain == "" {
 		return errNoChainProvided

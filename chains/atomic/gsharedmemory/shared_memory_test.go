@@ -9,7 +9,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
@@ -19,7 +19,6 @@ import (
 	"github.com/ava-labs/avalanchego/database/memdb"
 	"github.com/ava-labs/avalanchego/database/prefixdb"
 	"github.com/ava-labs/avalanchego/ids"
-	"github.com/ava-labs/avalanchego/utils/logging"
 	"github.com/ava-labs/avalanchego/utils/units"
 	"github.com/ava-labs/avalanchego/vms/rpcchainvm/grpcutils"
 
@@ -31,30 +30,28 @@ const (
 )
 
 func TestInterface(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
 	chainID0 := ids.GenerateTestID()
 	chainID1 := ids.GenerateTestID()
 
 	for _, test := range atomic.SharedMemoryTests {
-		m := atomic.Memory{}
 		baseDB := memdb.New()
 		memoryDB := prefixdb.New([]byte{0}, baseDB)
 		testDB := prefixdb.New([]byte{1}, baseDB)
 
-		err := m.Initialize(logging.NoLog{}, memoryDB)
-		assert.NoError(err)
+		m := atomic.NewMemory(memoryDB)
 
 		sm0, conn0 := wrapSharedMemory(t, m.NewSharedMemory(chainID0), baseDB)
 		sm1, conn1 := wrapSharedMemory(t, m.NewSharedMemory(chainID1), baseDB)
 
 		test(t, chainID0, chainID1, sm0, sm1, testDB)
 
-		err = conn0.Close()
-		assert.NoError(err)
+		err := conn0.Close()
+		require.NoError(err)
 
 		err = conn1.Close()
-		assert.NoError(err)
+		require.NoError(err)
 	}
 }
 

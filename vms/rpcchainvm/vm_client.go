@@ -10,13 +10,15 @@ import (
 	"fmt"
 	"time"
 
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+
 	"github.com/hashicorp/go-plugin"
 
 	"github.com/prometheus/client_golang/prometheus"
 
 	dto "github.com/prometheus/client_model/go"
 
-	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"go.uber.org/zap"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -57,6 +59,13 @@ import (
 	vmpb "github.com/ava-labs/avalanchego/proto/pb/vm"
 )
 
+const (
+	decidedCacheSize    = 2048
+	missingCacheSize    = 2048
+	unverifiedCacheSize = 2048
+	bytesToIDCacheSize  = 2048
+)
+
 var (
 	errUnsupportedFXs                       = errors.New("unsupported feature extensions")
 	errBatchedParseBlockWrongNumberOfBlocks = errors.New("BatchedParseBlock returned different number of blocks than expected")
@@ -70,13 +79,6 @@ var (
 	_ snowman.Block = &blockClient{}
 
 	_ block.StateSummary = &summaryClient{}
-)
-
-const (
-	decidedCacheSize    = 2048
-	missingCacheSize    = 2048
-	unverifiedCacheSize = 2048
-	bytesToIDCacheSize  = 2048
 )
 
 // VMClient is an implementation of a VM that talks over RPC.
@@ -162,7 +164,10 @@ func (vm *VMClient) Initialize(
 		serverAddr := serverListener.Addr().String()
 
 		go grpcutils.Serve(serverListener, vm.getDBServerFunc(db))
-		vm.ctx.Log.Info("grpc: serving database version: %s on: %s", dbVersion, serverAddr)
+		vm.ctx.Log.Info("grpc: serving database",
+			zap.String("version", dbVersion),
+			zap.String("address", serverAddr),
+		)
 
 		versionedDBServers[i] = &vmpb.VersionedDBServer{
 			ServerAddr: serverAddr,
@@ -184,7 +189,9 @@ func (vm *VMClient) Initialize(
 	serverAddr := serverListener.Addr().String()
 
 	go grpcutils.Serve(serverListener, vm.getInitServer)
-	vm.ctx.Log.Info("grpc: serving vm services on: %s", serverAddr)
+	vm.ctx.Log.Info("grpc: serving vm services",
+		zap.String("address", serverAddr),
+	)
 
 	resp, err := vm.client.Initialize(context.Background(), &vmpb.InitializeRequest{
 		NetworkId:    ctx.NetworkID,
@@ -413,7 +420,7 @@ func (vm *VMClient) CreateStaticHandlers() (map[string]*common.HTTPHandler, erro
 	return handlers, nil
 }
 
-func (vm *VMClient) Connected(nodeID ids.NodeID, nodeVersion version.Application) error {
+func (vm *VMClient) Connected(nodeID ids.NodeID, nodeVersion *version.Application) error {
 	_, err := vm.client.Connected(context.Background(), &vmpb.ConnectedRequest{
 		NodeId:  nodeID[:],
 		Version: nodeVersion.String(),

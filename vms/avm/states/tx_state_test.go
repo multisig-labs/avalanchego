@@ -8,13 +8,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/ava-labs/avalanchego/database"
 	"github.com/ava-labs/avalanchego/database/memdb"
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/utils/crypto"
-	"github.com/ava-labs/avalanchego/utils/formatting"
 	"github.com/ava-labs/avalanchego/utils/units"
 	"github.com/ava-labs/avalanchego/vms/avm/fxs"
 	"github.com/ava-labs/avalanchego/vms/avm/txs"
@@ -28,27 +27,11 @@ var (
 	networkID uint32 = 10
 	chainID          = ids.ID{5, 4, 3, 2, 1}
 	assetID          = ids.ID{1, 2, 3}
-	keys      []*crypto.PrivateKeySECP256K1R
-	addrs     []ids.ShortID // addrs[i] corresponds to keys[i]
+	keys             = crypto.BuildTestKeys()
 )
 
-func init() {
-	factory := crypto.FactorySECP256K1R{}
-
-	for _, key := range []string{
-		"24jUJ9vZexUM6expyMcT48LBx27k1m7xpraoV62oSQAHdziao5",
-		"2MMvUMsxx6zsHSNXJdFD8yc5XkancvwyKPwpw4xUK3TCGDuNBY",
-		"cxb7KpGWhDMALTjNNSJ7UQkkomPesyWAPUaWRGdyeBNzR6f35",
-	} {
-		keyBytes, _ := formatting.Decode(formatting.CB58, key)
-		pk, _ := factory.ToPrivateKey(keyBytes)
-		keys = append(keys, pk.(*crypto.PrivateKeySECP256K1R))
-		addrs = append(addrs, pk.PublicKey().Address())
-	}
-}
-
 func TestTxState(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
 	db := memdb.New()
 	parser, err := txs.NewParser([]fxs.Fx{
@@ -56,18 +39,18 @@ func TestTxState(t *testing.T) {
 		&nftfx.Fx{},
 		&propertyfx.Fx{},
 	})
-	assert.NoError(err)
+	require.NoError(err)
 
 	stateIntf, err := NewTxState(db, parser, prometheus.NewRegistry())
-	assert.NoError(err)
+	require.NoError(err)
 
 	s := stateIntf.(*txState)
 
 	_, err = s.GetTx(ids.Empty)
-	assert.Equal(database.ErrNotFound, err)
+	require.Equal(database.ErrNotFound, err)
 
 	tx := &txs.Tx{
-		UnsignedTx: &txs.BaseTx{
+		Unsigned: &txs.BaseTx{
 			BaseTx: avax.BaseTx{
 				NetworkID:    networkID,
 				BlockchainID: chainID,
@@ -91,29 +74,29 @@ func TestTxState(t *testing.T) {
 	}
 
 	err = tx.SignSECP256K1Fx(parser.Codec(), [][]*crypto.PrivateKeySECP256K1R{{keys[0]}})
-	assert.NoError(err)
+	require.NoError(err)
 
 	err = s.PutTx(ids.Empty, tx)
-	assert.NoError(err)
+	require.NoError(err)
 
 	loadedTx, err := s.GetTx(ids.Empty)
-	assert.NoError(err)
-	assert.Equal(tx.ID(), loadedTx.ID())
+	require.NoError(err)
+	require.Equal(tx.ID(), loadedTx.ID())
 
 	s.txCache.Flush()
 
 	loadedTx, err = s.GetTx(ids.Empty)
-	assert.NoError(err)
-	assert.Equal(tx.ID(), loadedTx.ID())
+	require.NoError(err)
+	require.Equal(tx.ID(), loadedTx.ID())
 
 	err = s.DeleteTx(ids.Empty)
-	assert.NoError(err)
+	require.NoError(err)
 
 	_, err = s.GetTx(ids.Empty)
-	assert.Equal(database.ErrNotFound, err)
+	require.Equal(database.ErrNotFound, err)
 
 	s.txCache.Flush()
 
 	_, err = s.GetTx(ids.Empty)
-	assert.Equal(database.ErrNotFound, err)
+	require.Equal(database.ErrNotFound, err)
 }

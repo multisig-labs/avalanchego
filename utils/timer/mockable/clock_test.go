@@ -6,6 +6,8 @@ package mockable
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestClockSet(t *testing.T) {
@@ -28,6 +30,12 @@ func TestClockSync(t *testing.T) {
 	if clock.Time().Equal(time.Unix(0, 0)) {
 		t.Error("Clock was synced, but returned a fake time")
 	}
+}
+
+func TestClockUnixTime(t *testing.T) {
+	clock := Clock{true, time.Unix(123, 123)}
+	require.Zero(t, clock.UnixTime().Nanosecond())
+	require.Equal(t, 123, clock.Time().Nanosecond())
 }
 
 func TestClockUnix(t *testing.T) {

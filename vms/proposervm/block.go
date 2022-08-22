@@ -5,7 +5,10 @@ package proposervm
 
 import (
 	"errors"
+	"fmt"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/snow"
@@ -116,8 +119,11 @@ func (p *postForkCommonComponents) Verify(parentTimestamp time.Time, parentPChai
 		childID := child.ID()
 		currentPChainHeight, err := p.vm.ctx.ValidatorState.GetCurrentHeight()
 		if err != nil {
-			p.vm.ctx.Log.Error("failed to get current P-Chain height while processing %s: %s",
-				childID, err)
+			p.vm.ctx.Log.Error("block verification failed",
+				zap.String("reason", "failed to get current P-Chain height"),
+				zap.Stringer("blkID", childID),
+				zap.Error(err),
+			)
 			return err
 		}
 		if childPChainHeight > currentPChainHeight {
@@ -142,8 +148,12 @@ func (p *postForkCommonComponents) Verify(parentTimestamp time.Time, parentPChai
 			return err
 		}
 
-		p.vm.ctx.Log.Debug("verified post-fork block %s - parent timestamp %v, expected delay %v, block timestamp %v",
-			childID, parentTimestamp, minDelay, childTimestamp)
+		p.vm.ctx.Log.Debug("verified post-fork block",
+			zap.Stringer("blkID", childID),
+			zap.Time("parentTimestamp", parentTimestamp),
+			zap.Duration("minDelay", minDelay),
+			zap.Time("blockTimestamp", childTimestamp),
+		)
 	}
 
 	return p.vm.verifyAndRecordInnerBlk(child)
@@ -182,8 +192,11 @@ func (p *postForkCommonComponents) buildChild(
 			// by having previously notified the consensus engine to attempt to
 			// build a block on top of a block that is no longer the preferred
 			// block.
-			p.vm.ctx.Log.Debug("build block dropped; parent timestamp %s, expected delay %s, block timestamp %s",
-				parentTimestamp, minDelay, newTimestamp)
+			p.vm.ctx.Log.Debug("build block dropped",
+				zap.Time("parentTimestamp", parentTimestamp),
+				zap.Duration("minDelay", minDelay),
+				zap.Time("blockTimestamp", newTimestamp),
+			)
 
 			// In case the inner VM only issued one pendingTxs message, we
 			// should attempt to re-handle that once it is our turn to build the
@@ -234,8 +247,11 @@ func (p *postForkCommonComponents) buildChild(
 		},
 	}
 
-	p.vm.ctx.Log.Info("built block %s - parent timestamp %v, block timestamp %v",
-		child.ID(), parentTimestamp, newTimestamp)
+	p.vm.ctx.Log.Info("built block",
+		zap.Stringer("blkID", child.ID()),
+		zap.Time("parentTimestamp", parentTimestamp),
+		zap.Time("blockTimestamp", newTimestamp),
+	)
 	return child, nil
 }
 
@@ -250,7 +266,10 @@ func (p *postForkCommonComponents) setInnerBlk(innerBlk snowman.Block) {
 func verifyIsOracleBlock(b snowman.Block) error {
 	oracle, ok := b.(snowman.OracleBlock)
 	if !ok {
-		return errUnexpectedBlockType
+		return fmt.Errorf(
+			"%w: expected block %s to be a snowman.OracleBlock but it's a %T",
+			errUnexpectedBlockType, b.ID(), b,
+		)
 	}
 	_, err := oracle.Options()
 	return err
@@ -264,7 +283,10 @@ func verifyIsNotOracleBlock(b snowman.Block) error {
 	_, err := oracle.Options()
 	switch err {
 	case nil:
-		return errUnexpectedBlockType
+		return fmt.Errorf(
+			"%w: expected block %s not to be an oracle block but it's a %T",
+			errUnexpectedBlockType, b.ID(), b,
+		)
 	case snowman.ErrNotOracle:
 		return nil
 	default:

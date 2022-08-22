@@ -16,6 +16,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"go.uber.org/zap"
+
 	"github.com/ava-labs/avalanchego/cache"
 	"github.com/ava-labs/avalanchego/database"
 	"github.com/ava-labs/avalanchego/database/manager"
@@ -110,7 +112,7 @@ type VM struct {
 	uniqueTxs cache.Deduplicator
 }
 
-func (vm *VM) Connected(nodeID ids.NodeID, nodeVersion version.Application) error {
+func (vm *VM) Connected(nodeID ids.NodeID, nodeVersion *version.Application) error {
 	return nil
 }
 
@@ -144,7 +146,9 @@ func (vm *VM) Initialize(
 		if err := stdjson.Unmarshal(configBytes, &avmConfig); err != nil {
 			return err
 		}
-		ctx.Log.Info("VM config initialized %+v", avmConfig)
+		ctx.Log.Info("VM config initialized",
+			zap.Reflect("config", avmConfig),
+		)
 	}
 
 	registerer := prometheus.NewRegistry()
@@ -434,7 +438,7 @@ func (vm *VM) initGenesis(genesisBytes []byte) error {
 		}
 
 		tx := txs.Tx{
-			UnsignedTx: &genesisTx.CreateAssetTx,
+			Unsigned: &genesisTx.CreateAssetTx,
 		}
 		if err := vm.parser.InitializeGenesisTx(&tx); err != nil {
 			return err
@@ -451,7 +455,10 @@ func (vm *VM) initGenesis(genesisBytes []byte) error {
 			}
 		}
 		if index == 0 {
-			vm.ctx.Log.Info("Fee payments are using Asset with Alias: %s, AssetID: %s", genesisTx.Alias, txID)
+			vm.ctx.Log.Info("fee asset is established",
+				zap.String("alias", genesisTx.Alias),
+				zap.Stringer("assetID", txID),
+			)
 			vm.feeAssetID = txID
 		}
 	}
@@ -465,7 +472,9 @@ func (vm *VM) initGenesis(genesisBytes []byte) error {
 
 func (vm *VM) initState(tx txs.Tx) error {
 	txID := tx.ID()
-	vm.ctx.Log.Info("initializing with AssetID %s", txID)
+	vm.ctx.Log.Info("initializing genesis asset",
+		zap.Stringer("txID", txID),
+	)
 	if err := vm.state.PutTx(txID, &tx); err != nil {
 		return err
 	}
@@ -473,7 +482,7 @@ func (vm *VM) initState(tx txs.Tx) error {
 		return err
 	}
 	for _, utxo := range tx.UTXOs() {
-		if err := vm.state.PutUTXO(utxo.InputID(), utxo); err != nil {
+		if err := vm.state.PutUTXO(utxo); err != nil {
 			return err
 		}
 	}
@@ -570,7 +579,7 @@ func (vm *VM) verifyFxUsage(fxID int, assetID ids.ID) bool {
 	if status := tx.Status(); !status.Fetched() {
 		return false
 	}
-	createAssetTx, ok := tx.UnsignedTx.(*txs.CreateAssetTx)
+	createAssetTx, ok := tx.Unsigned.(*txs.CreateAssetTx)
 	if !ok {
 		// This transaction was not an asset creation tx
 		return false
@@ -586,7 +595,7 @@ func (vm *VM) verifyFxUsage(fxID int, assetID ids.ID) bool {
 	return fxIDs.Contains(uint(fxID))
 }
 
-func (vm *VM) verifyTransferOfUTXO(tx txs.UnsignedTx, in *avax.TransferableInput, cred verify.Verifiable, utxo *avax.UTXO) error {
+func (vm *VM) verifyTransferOfUTXO(utx txs.UnsignedTx, in *avax.TransferableInput, cred verify.Verifiable, utxo *avax.UTXO) error {
 	fxIndex, err := vm.getFx(cred)
 	if err != nil {
 		return err
@@ -603,7 +612,7 @@ func (vm *VM) verifyTransferOfUTXO(tx txs.UnsignedTx, in *avax.TransferableInput
 		return errIncompatibleFx
 	}
 
-	return fx.VerifyTransfer(tx, in.In, cred, utxo.Out)
+	return fx.VerifyTransfer(utx, in.In, cred, utxo.Out)
 }
 
 func (vm *VM) verifyTransfer(tx txs.UnsignedTx, in *avax.TransferableInput, cred verify.Verifiable) error {
