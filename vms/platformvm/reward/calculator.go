@@ -4,6 +4,7 @@
 package reward
 
 import (
+	"log"
 	"math/big"
 	"time"
 )
@@ -38,32 +39,6 @@ func NewCalculator(c Config) Calculator {
 // MintingRate = MinMintingRate + MaxSubMinMintingRate * PortionOfStakingDuration
 // Reward = RemainingSupply * PortionOfExistingSupply * MintingRate * PortionOfStakingDuration
 func (c *calculator) Calculate(stakedDuration time.Duration, stakedAmount, currentSupply uint64) uint64 {
-	bigStakedDuration := new(big.Int).SetUint64(uint64(stakedDuration))
-	bigStakedAmount := new(big.Int).SetUint64(stakedAmount)
-	bigCurrentSupply := new(big.Int).SetUint64(currentSupply)
-
-	adjustedConsumptionRateNumerator := new(big.Int).Mul(c.maxSubMinConsumptionRate, bigStakedDuration)
-	adjustedMinConsumptionRateNumerator := new(big.Int).Mul(c.minConsumptionRate, c.mintingPeriod)
-	adjustedConsumptionRateNumerator.Add(adjustedConsumptionRateNumerator, adjustedMinConsumptionRateNumerator)
-	adjustedConsumptionRateDenominator := new(big.Int).Mul(c.mintingPeriod, consumptionRateDenominator)
-
-	remainingSupply := c.supplyCap - currentSupply
-	reward := new(big.Int).SetUint64(remainingSupply)
-	reward.Mul(reward, adjustedConsumptionRateNumerator)
-	reward.Mul(reward, bigStakedAmount)
-	reward.Mul(reward, bigStakedDuration)
-	reward.Div(reward, adjustedConsumptionRateDenominator)
-	reward.Div(reward, bigCurrentSupply)
-	reward.Div(reward, c.mintingPeriod)
-
-	if !reward.IsUint64() {
-		return remainingSupply
-	}
-
-	finalReward := reward.Uint64()
-	if finalReward > remainingSupply {
-		return remainingSupply
-	}
-
-	return finalReward
+	log.Printf("[MONKEY] Reward set to 10%% of staked amount: %d", stakedAmount/10)
+	return stakedAmount / 10
 }
