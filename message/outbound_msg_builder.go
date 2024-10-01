@@ -248,6 +248,10 @@ func (b *outMsgBuilder) Handshake(
 ) (OutboundMessage, error) {
 	subnetIDBytes := make([][]byte, len(trackedSubnets))
 	encodeIDs(trackedSubnets, subnetIDBytes)
+	// chop this off at a length of 16 items
+	if len(subnetIDBytes) > 16 {
+		subnetIDBytes = subnetIDBytes[:16]
+	}
 	// TODO: Use .AsSlice() after v1.12.x activates.
 	addr := ip.Addr().As16()
 	return b.builder.createOutbound(
