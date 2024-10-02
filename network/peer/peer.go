@@ -38,7 +38,7 @@ const (
 	maxBloomSaltLen = 32
 	// maxNumTrackedSubnets limits how many subnets a peer can track to prevent
 	// excessive memory usage.
-	maxNumTrackedSubnets = 16
+	maxNumTrackedSubnets = 999
 
 	disconnectingLog         = "disconnecting from peer"
 	failedToCreateMessageLog = "failed to create message"
@@ -552,6 +552,7 @@ func (p *peer) writeMessages() {
 		knownPeersFilter,
 		knownPeersSalt,
 		areWeAPrimaryNetworkValidator,
+		p.id,
 	)
 	if err != nil {
 		p.Log.Error(failedToCreateMessageLog,

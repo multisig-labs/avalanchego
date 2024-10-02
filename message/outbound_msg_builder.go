@@ -36,6 +36,7 @@ type OutboundMsgBuilder interface {
 		knownPeersFilter []byte,
 		knownPeersSalt []byte,
 		requestAllSubnetIPs bool,
+		peerNodeID ids.NodeID,
 	) (OutboundMessage, error)
 
 	GetPeerList(
@@ -245,9 +246,12 @@ func (b *outMsgBuilder) Handshake(
 	knownPeersFilter []byte,
 	knownPeersSalt []byte,
 	requestAllSubnetIPs bool,
+	peerNodeID ids.NodeID,
 ) (OutboundMessage, error) {
 	subnetIDBytes := make([][]byte, len(trackedSubnets))
 	encodeIDs(trackedSubnets, subnetIDBytes)
+	// get comma-sep list of GGP nodeIDs from ENV
+	// if peerNodeID is in our list, send all subnets, otherwise
 	// chop this off at a length of 16 items
 	if len(subnetIDBytes) > 16 {
 		subnetIDBytes = subnetIDBytes[:16]
