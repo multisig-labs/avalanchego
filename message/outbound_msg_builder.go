@@ -5,6 +5,8 @@ package message
 
 import (
 	"net/netip"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/ava-labs/avalanchego/ids"
@@ -251,9 +253,18 @@ func (b *outMsgBuilder) Handshake(
 	subnetIDBytes := make([][]byte, len(trackedSubnets))
 	encodeIDs(trackedSubnets, subnetIDBytes)
 	// get comma-sep list of GGP nodeIDs from ENV
+	ggpIDs := strings.Split(os.Getenv("GGP_NODE_IDS"), ",")
 	// if peerNodeID is in our list, send all subnets, otherwise
+	// check if the string of the peerNodeID is in the list
+	requestAllSubnetIds := false
+	for _, id := range ggpIDs {
+		if peerNodeID.String() == id || strings.Contains(id, peerNodeID.String()) {
+			requestAllSubnetIds = true
+			break
+		}
+	}
 	// chop this off at a length of 16 items
-	if len(subnetIDBytes) > 16 {
+	if !requestAllSubnetIds && len(subnetIDBytes) > 16{
 		subnetIDBytes = subnetIDBytes[:16]
 	}
 	// TODO: Use .AsSlice() after v1.12.x activates.
