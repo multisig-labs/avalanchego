@@ -4,6 +4,7 @@
 package message
 
 import (
+	"fmt"
 	"net/netip"
 	"os"
 	"strings"
@@ -254,12 +255,15 @@ func (b *outMsgBuilder) Handshake(
 	encodeIDs(trackedSubnets, subnetIDBytes)
 	// get comma-sep list of GGP nodeIDs from ENV
 	ggpIDs := strings.Split(os.Getenv("GGP_NODE_IDS"), ",")
+	// print the number of GGP nodeIDs
+	fmt.Printf("GGP NodeIDs: %d\n", len(ggpIDs))
 	// if peerNodeID is in our list, send all subnets, otherwise
 	// check if the string of the peerNodeID is in the list
 	requestAllSubnetIds := false
 	for _, id := range ggpIDs {
 		if peerNodeID.String() == id || strings.Contains(id, peerNodeID.String()) {
 			requestAllSubnetIds = true
+			fmt.Printf("Sending all subnets to %s\n", peerNodeID.String())
 			break
 		}
 	}
