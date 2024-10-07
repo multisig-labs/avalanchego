@@ -1123,6 +1123,13 @@ func (p *peer) handleHandshake(msg *p2p.Handshake) {
 	p.gotHandshake.Set(true)
 
 	peerIPs := p.Network.Peers(p.id, p.trackedSubnets, msg.AllSubnets, knownPeers, salt)
+	// Log nodeID and AddrPort for each peer
+	for _, peerIP := range peerIPs {
+		p.Log.Debug("peer in peerList",
+			zap.Stringer("nodeID", peerIP.NodeID),
+			zap.Stringer("addrPort", peerIP.AddrPort),
+		)
+	}
 
 	// We bypass throttling here to ensure that the handshake message is
 	// acknowledged correctly.
