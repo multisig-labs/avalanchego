@@ -38,7 +38,7 @@ const (
 	maxBloomSaltLen = 32
 	// maxNumTrackedSubnets limits how many subnets a peer can track to prevent
 	// excessive memory usage.
-	maxNumTrackedSubnets = 16
+	maxNumTrackedSubnets = 999
 
 	disconnectingLog         = "disconnecting from peer"
 	failedToCreateMessageLog = "failed to create message"
@@ -532,6 +532,7 @@ func (p *peer) writeMessages() {
 		knownPeersFilter,
 		knownPeersSalt,
 		areWeAPrimaryNetworkValidator,
+		p.id,
 	)
 	if err != nil {
 		p.Log.Error(failedToCreateMessageLog,
@@ -1030,6 +1031,13 @@ func (p *peer) handleHandshake(msg *p2p.Handshake) {
 	p.gotHandshake.Set(true)
 
 	peerIPs := p.Network.Peers(p.id, p.trackedSubnets, msg.AllSubnets, knownPeers, salt)
+	// Log nodeID and AddrPort for each peer
+	for _, peerIP := range peerIPs {
+		p.Log.Debug("peer in peerList",
+			zap.Stringer("nodeID", peerIP.NodeID),
+			zap.Stringer("addrPort", peerIP.AddrPort),
+		)
+	}
 
 	// We bypass throttling here to ensure that the handshake message is
 	// acknowledged correctly.
