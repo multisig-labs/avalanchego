@@ -61,7 +61,7 @@ BUILD_MULTI_ARCH="${BUILD_MULTI_ARCH:-}"
 # simplifies creation of multi-arch images.
 #
 # Reference: https://docs.docker.com/build/buildkit/
-DOCKER_CMD="docker buildx build ${*}"
+DOCKER_CMD="docker buildx build ${*:-}"
 
 # The dockerfile doesn't specify the golang version to minimize the
 # changes required to bump the version. Instead, the golang version is
